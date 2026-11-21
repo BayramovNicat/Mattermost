@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { Server } from 'bun';
+import { buildChannelSearchTerms, hasExplicitInModifier } from '../src/utils/search';
 import { MattermostAPI } from './api';
 import type { WebSocketMessage } from './types';
 import { MattermostWebSocketClient } from './websocket';
@@ -64,6 +65,190 @@ export function startServerWithFallback(
 export function startServer(port = PORT): Server<unknown> {
   const api = new MattermostAPI();
   let serverInstance: Server<unknown> | null = null;
+  let defaultTeamId = '';
+  const channelMetaCache = new Map<
+    string,
+    { id: string; name: string; type: string; team_id?: string; otherUsername?: string }
+  >();
+
+  const resolveTeamId = async (preferredTeamId?: string): Promise<string> => {
+    if (preferredTeamId) return preferredTeamId;
+    if (defaultTeamId) return defaultTeamId;
+    const teams = await api.getMyTeams();
+    defaultTeamId = teams[0]?.id || '';
+    return defaultTeamId;
+  };
+
+  const resolveChannelSearchMeta = async (channelId: string) => {
+    const cached = channelMetaCache.get(channelId);
+    if (cached) return cached;
+
+    const ch = await api.getChannel(channelId);
+    let otherUsername: string | undefined;
+    if (ch.type === 'D') {
+      const me = (await api.getMe()) as { id: string };
+      const parts = ch.name.split('__');
+      const otherId = parts.find((id) => id !== me.id) || me.id;
+      const otherUser = await api.getUser(otherId);
+      otherUsername = otherUser.username;
+    }
+
+    const meta = {
+      id: ch.id,
+      name: ch.name,
+      type: ch.type,
+      team_id: ch.team_id || undefined,
+      otherUsername,
+    };
+    channelMetaCache.set(channelId, meta);
+    return meta;
+  };
+
+  const handleSearch = async (req: Request, url: URL, pathChannelId?: string): Promise<Response> => {
+    try {
+      let query = url.searchParams.get('q') ?? url.searchParams.get('terms') ?? '';
+      let targetChannelId = pathChannelId || url.searchParams.get('channel_id') || '';
+      let explicitTeamId = url.searchParams.get('team_id') || '';
+      let isOrSearch = url.searchParams.get('is_or_search') === 'true';
+      let page = Number.parseInt(url.searchParams.get('page') || '0', 10) || 0;
+      let perPage = Number.parseInt(url.searchParams.get('per_page') || '30', 10) || 30;
+      let timeZoneOffset = Number.parseInt(url.searchParams.get('time_zone_offset') || '0', 10) || 0;
+
+      if (req.method === 'POST') {
+        const body = (await req.json().catch(() => ({}))) as {
+          q?: string;
+          terms?: string;
+          channel_id?: string;
+          team_id?: string;
+          is_or_search?: boolean;
+          page?: number;
+          per_page?: number;
+          time_zone_offset?: number;
+        };
+        query = body.q ?? body.terms ?? query;
+        targetChannelId = pathChannelId || body.channel_id || targetChannelId;
+        explicitTeamId = body.team_id || explicitTeamId;
+        if (typeof body.is_or_search === 'boolean') isOrSearch = body.is_or_search;
+        if (typeof body.page === 'number') page = body.page;
+        if (typeof body.per_page === 'number') perPage = body.per_page;
+        if (typeof body.time_zone_offset === 'number') timeZoneOffset = body.time_zone_offset;
+      }
+
+      const trimmedQuery = query.trim();
+      page = Math.max(0, page);
+      perPage = Math.min(100, Math.max(1, perPage));
+
+      if (!trimmedQuery) {
+        return Response.json({
+          order: [],
+          posts: {},
+          matches: {},
+          users: {},
+          query: '',
+          terms: '',
+          channelId: targetChannelId || null,
+          page,
+          perPage,
+        });
+      }
+
+      let meta:
+        | { id: string; name: string; type: string; team_id?: string; otherUsername?: string }
+        | undefined;
+      let terms = trimmedQuery;
+      const userExplicitIn = hasExplicitInModifier(trimmedQuery);
+
+      if (targetChannelId) {
+        meta = await resolveChannelSearchMeta(targetChannelId);
+        terms = buildChannelSearchTerms(trimmedQuery, {
+          name: meta.name,
+          type: meta.type,
+          otherUser: meta.otherUsername ? { username: meta.otherUsername } : undefined,
+        });
+      }
+
+      const teamId = await resolveTeamId(explicitTeamId || meta?.team_id);
+
+      let searchData = await api.searchPosts({
+        terms,
+        teamId: teamId || undefined,
+        isOrSearch,
+        timeZoneOffset,
+        page,
+        perPage,
+      });
+
+      if (
+        meta?.type === 'G' &&
+        !userExplicitIn &&
+        (!searchData.order || searchData.order.length === 0)
+      ) {
+        searchData = await api.searchPosts({
+          terms: trimmedQuery,
+          teamId: teamId || undefined,
+          isOrSearch,
+          timeZoneOffset,
+          page,
+          perPage,
+        });
+      }
+
+      const rawOrder = searchData.order || [];
+      const rawPosts = searchData.posts || {};
+      const rawMatches = searchData.matches || {};
+
+      const shouldFilterByChannel = Boolean(targetChannelId && !userExplicitIn);
+      const order: string[] = [];
+      const posts: Record<string, (typeof rawPosts)[string]> = {};
+      const matches: Record<string, string[]> = {};
+      const userIds = new Set<string>();
+
+      for (const pid of rawOrder) {
+        const post = rawPosts[pid];
+        if (!post) continue;
+        if (shouldFilterByChannel && post.channel_id !== targetChannelId) continue;
+        order.push(pid);
+        posts[pid] = post;
+        if (rawMatches[pid]) {
+          matches[pid] = rawMatches[pid];
+        }
+        if (post.user_id) {
+          userIds.add(post.user_id);
+        }
+      }
+
+      const users: Record<string, { id: string; username: string; display_name: string }> = {};
+      if (userIds.size > 0) {
+        try {
+          const userList = await api.getUsersByIds([...userIds]);
+          for (const u of userList) {
+            users[u.id] = {
+              id: u.id,
+              username: u.username,
+              display_name: `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.username,
+            };
+          }
+        } catch (e) {
+          console.error('Failed to fetch users for search results:', e);
+        }
+      }
+
+      return Response.json({
+        order,
+        posts,
+        matches,
+        users,
+        query: trimmedQuery,
+        terms,
+        channelId: targetChannelId || null,
+        page,
+        perPage,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return Response.json({ error: message }, { status: 500 });
+    }
+  };
 
   const mmWs = new MattermostWebSocketClient((event: WebSocketMessage) => {
     if (serverInstance) {
@@ -121,6 +306,7 @@ export function startServer(port = PORT): Server<unknown> {
           const me = (await api.getMe()) as { id: string };
           const teams = await api.getMyTeams();
           if (teams.length === 0) return Response.json([]);
+          defaultTeamId = teams[0].id;
 
           const channels = (await api.getChannelsForTeam(teams[0].id)) as Array<
             Record<string, unknown> & { id: string; name: string; type: string; last_post_at?: number; otherUserId?: string; otherUser?: unknown }
@@ -160,11 +346,30 @@ export function startServer(port = PORT): Server<unknown> {
           }
 
           channels.sort((a, b) => (b.last_post_at || 0) - (a.last_post_at || 0));
+          for (const ch of channels) {
+            const other = ch.otherUser as { username?: string } | undefined;
+            channelMetaCache.set(ch.id, {
+              id: ch.id,
+              name: ch.name,
+              type: ch.type,
+              team_id: typeof ch.team_id === 'string' && ch.team_id ? ch.team_id : undefined,
+              otherUsername: other?.username,
+            });
+          }
           return Response.json(channels);
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           return Response.json({ error: message }, { status: 500 });
         }
+      }
+
+      const channelSearchMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/search$/);
+      if (channelSearchMatch && (req.method === 'GET' || req.method === 'POST')) {
+        return handleSearch(req, url, channelSearchMatch[1]);
+      }
+
+      if (url.pathname === '/api/search' && (req.method === 'GET' || req.method === 'POST')) {
+        return handleSearch(req, url);
       }
 
       const postsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/posts$/);

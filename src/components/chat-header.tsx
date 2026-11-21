@@ -7,6 +7,7 @@ import {
   HashIcon,
   LockIcon,
   PanelLeftIcon,
+  SearchIcon,
   SparklesIcon,
 } from './icons';
 
@@ -16,6 +17,8 @@ interface ChatHeaderProps {
   onToggleNotifications: () => void;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
+  isSearchOpen?: boolean;
+  onToggleSearch?: () => void;
   loadedMessagesCount?: number;
   onExtractChat?: () => void;
 }
@@ -26,6 +29,8 @@ export const ChatHeader = ({
   onToggleNotifications,
   isSidebarOpen,
   onToggleSidebar,
+  isSearchOpen = false,
+  onToggleSearch,
   loadedMessagesCount = 0,
   onExtractChat,
 }: ChatHeaderProps) => {
@@ -90,6 +95,24 @@ export const ChatHeader = ({
       </div>
 
       <div class="flex items-center gap-2">
+        <button
+          id="search-chat-button"
+          type="button"
+          onClick={onToggleSearch}
+          disabled={!channel}
+          class={`size-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+            !channel
+              ? 'text-zinc-600 opacity-40 cursor-not-allowed'
+              : isSearchOpen
+                ? 'text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20'
+                : 'text-zinc-400 hover:text-indigo-400 hover:bg-zinc-800'
+          }`}
+          title={channel ? 'Search in conversation (⌘F)' : 'Select a conversation to search'}
+          aria-label="Search in conversation"
+        >
+          <SearchIcon class="size-4" />
+        </button>
+
         <button
           id="extract-chat-button"
           type="button"

@@ -1,5 +1,10 @@
 import { getMattermostSession, onSessionChange } from './session';
-import type { MattermostSession, PostOptions } from './types';
+import type {
+  MattermostSession,
+  PostOptions,
+  SearchPostsOptions,
+  SearchPostsResponse,
+} from './types';
 
 const userCache = new Map<string, unknown>();
 const userStatusCache = new Map<string, string>();
@@ -72,6 +77,37 @@ export class MattermostAPI {
     teamId: string
   ): Promise<Array<Record<string, unknown>>> {
     return this.request(`/users/me/teams/${teamId}/channels`);
+  }
+
+  async getChannel(
+    channelId: string
+  ): Promise<{ id: string; name: string; display_name: string; type: string; team_id?: string }> {
+    return this.request(`/channels/${channelId}`);
+  }
+
+  async searchPosts(options: SearchPostsOptions): Promise<SearchPostsResponse> {
+    const {
+      terms,
+      teamId,
+      isOrSearch = false,
+      includeDeletedChannels = false,
+      timeZoneOffset = 0,
+      page = 0,
+      perPage = 30,
+    } = options;
+
+    const endpoint = teamId ? `/teams/${teamId}/posts/search` : '/posts/search';
+    return this.request<SearchPostsResponse>(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({
+        terms,
+        is_or_search: isOrSearch,
+        include_deleted_channels: includeDeletedChannels,
+        time_zone_offset: timeZoneOffset,
+        page,
+        per_page: perPage,
+      }),
+    });
   }
 
   async getChannelPosts(

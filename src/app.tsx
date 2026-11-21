@@ -4,6 +4,7 @@ import { ExtractModal } from './components/extract-modal';
 import { BellIcon, BellOffIcon } from './components/icons';
 import { MessageInput } from './components/message-input';
 import { MessageList, type MessageListHandle } from './components/message-list';
+import { SearchPanel, type SearchPanelHandle } from './components/search-panel';
 import { Sidebar } from './components/sidebar';
 import {
   getNotificationPermission,
@@ -23,8 +24,12 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let typingTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimer: ReturnType<typeof setTimeout> | null = null;
 let scrollContainer: HTMLElement | null = null;
+let messageListSlotEl: HTMLElement | null = null;
 let messageListHandle: MessageListHandle | null = null;
+let searchSlotEl: HTMLElement | null = null;
+let searchPanelHandle: SearchPanelHandle | null = null;
 let scrollRafPending = false;
+let jumpRequestSeq = 0;
 
 const initialSoundEnabled =
   typeof localStorage !== 'undefined' ? localStorage.getItem('mm_sound') !== 'false' : true;
@@ -44,8 +49,11 @@ const state: AppState = {
   activeChannelId: null,
   posts: [],
   oldestPostId: null,
+  newestPostId: null,
   hasMoreOlderPosts: true,
+  hasMoreNewerPosts: false,
   isLoadingOlder: false,
+  isLoadingNewer: false,
   isConnected: false,
   typingText: '',
   errorMessage: null,
@@ -54,6 +62,7 @@ const state: AppState = {
   soundEnabled: initialSoundEnabled,
   notificationsEnabled: initialNotificationsEnabled,
   isSidebarOpen: initialSidebarOpen,
+  isSearchOpen: false,
 };
 
 const updateDocumentTitle = () => {
@@ -276,8 +285,128 @@ const handleExtractChat = () => {
   document.body.appendChild(modalEl);
 };
 
+const patchSearchButton = (isOpen: boolean) => {
+  const btn = document.querySelector<HTMLButtonElement>('#search-chat-button');
+  if (!btn) return;
+  const hasChannel = Boolean(state.activeChannelId);
+  btn.disabled = !hasChannel;
+  btn.className = `size-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+    !hasChannel
+      ? 'text-zinc-600 opacity-40 cursor-not-allowed'
+      : isOpen
+        ? 'text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20'
+        : 'text-zinc-400 hover:text-indigo-400 hover:bg-zinc-800'
+  }`;
+  btn.title = hasChannel ? 'Search in conversation (⌘F)' : 'Select a conversation to search';
+};
+
+const mergeUsers = (incomingUsers: Record<string, User>) => {
+  for (const uid in incomingUsers) {
+    const existing = usersMap.get(uid);
+    const merged = { ...existing, ...incomingUsers[uid] };
+    usersMap.set(uid, merged);
+    if (merged.status) {
+      patchUserStatus(uid, merged.status);
+    }
+  }
+};
+
+const createMessageList = () => (
+  <MessageList
+    posts={state.posts}
+    usersMap={usersMap}
+    currentUserId={state.currentUser?.id}
+    isLoadingOlder={state.isLoadingOlder}
+    hasMoreOlderPosts={state.hasMoreOlderPosts}
+    isLoadingNewer={state.isLoadingNewer}
+    hasMoreNewerPosts={state.hasMoreNewerPosts}
+    onJumpToLatest={() => {
+      jumpToLatest();
+    }}
+    scrollRef={(el) => {
+      scrollContainer = el;
+    }}
+    handleRef={(handle) => {
+      messageListHandle = handle;
+    }}
+    onScroll={handleScroll}
+    onRetry={(failedPost) => {
+      sendMessage(failedPost.message, { retryPost: failedPost });
+    }}
+  />
+);
+
+const mountMessageList = () => {
+  messageListHandle?.destroy();
+  messageListHandle = null;
+  if (!messageListSlotEl) {
+    render();
+    return;
+  }
+  messageListSlotEl.replaceChildren(createMessageList());
+  patchExtractButton();
+};
+
+const createSearchPanel = (channel: Channel | undefined) => (
+  <SearchPanel
+    channel={channel}
+    usersMap={usersMap}
+    currentUserId={state.currentUser?.id}
+    onClose={() => closeSearchPanel()}
+    onJumpToPost={(post) => jumpToPost(post)}
+    onUsersLoaded={mergeUsers}
+    handleRef={(handle) => {
+      searchPanelHandle = handle;
+    }}
+  />
+);
+
+const mountSearchPanel = () => {
+  searchPanelHandle?.destroy();
+  searchPanelHandle = null;
+  if (!searchSlotEl) return;
+
+  if (!state.isSearchOpen || !state.activeChannelId) {
+    searchSlotEl.replaceChildren();
+    return;
+  }
+
+  const activeChannel = state.channels.find((c) => c.id === state.activeChannelId);
+  searchSlotEl.replaceChildren(createSearchPanel(activeChannel));
+  const currentHandle = searchPanelHandle as SearchPanelHandle | null;
+  currentHandle?.focus();
+};
+
+const openSearchPanel = () => {
+  if (!state.activeChannelId) return;
+  if (state.isSearchOpen && searchPanelHandle) {
+    searchPanelHandle.focus();
+    return;
+  }
+  state.isSearchOpen = true;
+  patchSearchButton(true);
+  mountSearchPanel();
+};
+
+const closeSearchPanel = () => {
+  if (!state.isSearchOpen) return;
+  state.isSearchOpen = false;
+  patchSearchButton(false);
+  mountSearchPanel();
+};
+
+const toggleSearchPanel = () => {
+  if (state.isSearchOpen) {
+    closeSearchPanel();
+  } else {
+    openSearchPanel();
+  }
+};
+
 const render = () => {
   messageListHandle?.destroy();
+  searchPanelHandle?.destroy();
+  searchPanelHandle = null;
   updateDocumentTitle();
   const activeChannel = state.channels.find((c) => c.id === state.activeChannelId);
 
@@ -308,35 +437,41 @@ const render = () => {
           onToggleNotifications={handleToggleNotifications}
           isSidebarOpen={state.isSidebarOpen}
           onToggleSidebar={toggleSidebar}
+          isSearchOpen={state.isSearchOpen}
+          onToggleSearch={toggleSearchPanel}
           loadedMessagesCount={state.posts.length}
           onExtractChat={handleExtractChat}
         />
 
-        <MessageList
-          posts={state.posts}
-          usersMap={usersMap}
-          currentUserId={state.currentUser?.id}
-          isLoadingOlder={state.isLoadingOlder}
-          hasMoreOlderPosts={state.hasMoreOlderPosts}
-          scrollRef={(el) => {
-            scrollContainer = el;
-          }}
-          handleRef={(handle) => {
-            messageListHandle = handle;
-          }}
-          onScroll={handleScroll}
-          onRetry={(failedPost) => {
-            sendMessage(failedPost.message, { retryPost: failedPost });
-          }}
-        />
+        <div class="flex-1 flex min-h-0 overflow-hidden">
+          <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
+            <div
+              ref={(el) => {
+                messageListSlotEl = el;
+              }}
+              class="contents"
+            >
+              {createMessageList()}
+            </div>
 
-        <MessageInput
-          typingText={state.typingText}
-          errorMessage={state.errorMessage}
-          onSend={(text, files) => {
-            sendMessage(text, { files });
-          }}
-        />
+            <MessageInput
+              typingText={state.typingText}
+              errorMessage={state.errorMessage}
+              onSend={(text, files) => {
+                sendMessage(text, { files });
+              }}
+            />
+          </div>
+
+          <div
+            ref={(el) => {
+              searchSlotEl = el;
+            }}
+            class="contents"
+          >
+            {state.isSearchOpen && activeChannel ? createSearchPanel(activeChannel) : null}
+          </div>
+        </div>
       </main>
     </div>
   );
@@ -355,6 +490,10 @@ const handleScroll = (e: Event) => {
     scrollRafPending = false;
     if (target.scrollTop <= 150 && !state.isLoadingOlder && state.hasMoreOlderPosts) {
       loadOlderMessages();
+    }
+    const distanceFromBottom = target.scrollHeight - target.clientHeight - target.scrollTop;
+    if (distanceFromBottom <= 150 && !state.isLoadingNewer && state.hasMoreNewerPosts) {
+      loadNewerMessages();
     }
   });
 };
@@ -398,10 +537,14 @@ const selectChannel = async (channelId: string) => {
 
   state.posts = [];
   state.oldestPostId = null;
+  state.newestPostId = null;
   state.hasMoreOlderPosts = true;
+  state.hasMoreNewerPosts = false;
   state.isLoadingOlder = false;
+  state.isLoadingNewer = false;
   state.typingText = '';
   state.errorMessage = null;
+  jumpRequestSeq++;
   render();
 
   try {
@@ -410,14 +553,7 @@ const selectChannel = async (channelId: string) => {
     if (state.activeChannelId !== channelId) return;
 
     if (data.users) {
-      for (const uid in data.users) {
-        const existing = usersMap.get(uid);
-        const merged = { ...existing, ...data.users[uid] };
-        usersMap.set(uid, merged);
-        if (merged.status) {
-          patchUserStatus(uid, merged.status);
-        }
-      }
+      mergeUsers(data.users);
     }
 
     const order: string[] = data.order || [];
@@ -426,6 +562,7 @@ const selectChannel = async (channelId: string) => {
     if (order.length > 0) {
       state.oldestPostId = order[order.length - 1];
       state.posts = [...order].reverse().map((id) => postsObj[id]).filter(Boolean);
+      state.newestPostId = state.posts[state.posts.length - 1]?.id ?? null;
     } else {
       state.hasMoreOlderPosts = false;
     }
@@ -434,6 +571,165 @@ const selectChannel = async (channelId: string) => {
     scrollToBottom();
   } catch (err) {
     console.error('Failed to load posts:', err);
+  }
+};
+
+const jumpToLatest = async () => {
+  const channelId = state.activeChannelId;
+  if (!channelId) return;
+  const reqSeq = ++jumpRequestSeq;
+
+  try {
+    const res = await fetch(`/api/channels/${channelId}/posts?per_page=30`);
+    const data = await res.json();
+    if (reqSeq !== jumpRequestSeq || state.activeChannelId !== channelId) return;
+
+    if (data.users) {
+      mergeUsers(data.users);
+    }
+
+    const order: string[] = data.order || [];
+    const postsObj: Record<string, Post> = data.posts || {};
+
+    state.isLoadingOlder = false;
+    state.isLoadingNewer = false;
+    state.hasMoreNewerPosts = false;
+
+    if (order.length > 0) {
+      state.oldestPostId = order[order.length - 1];
+      state.posts = [...order].reverse().map((id) => postsObj[id]).filter(Boolean);
+      state.newestPostId = state.posts[state.posts.length - 1]?.id ?? null;
+      state.hasMoreOlderPosts = true;
+    } else {
+      state.posts = [];
+      state.oldestPostId = null;
+      state.newestPostId = null;
+      state.hasMoreOlderPosts = false;
+    }
+
+    mountMessageList();
+    scrollToBottom();
+  } catch (err) {
+    console.error('Failed to jump to latest:', err);
+  }
+};
+
+const jumpToPost = async (post: Post) => {
+  const channelId = post.channel_id || state.activeChannelId;
+  if (!channelId || channelId !== state.activeChannelId) return;
+
+  if (state.posts.some((p) => p.id === post.id) && messageListHandle?.scrollToPost(post.id)) {
+    return;
+  }
+
+  const reqSeq = ++jumpRequestSeq;
+  const contextSize = 15;
+
+  try {
+    const [beforeRes, afterRes] = await Promise.all([
+      fetch(
+        `/api/channels/${channelId}/posts?before=${encodeURIComponent(post.id)}&per_page=${contextSize}`
+      ),
+      fetch(
+        `/api/channels/${channelId}/posts?after=${encodeURIComponent(post.id)}&per_page=${contextSize}`
+      ),
+    ]);
+    const [beforeData, afterData] = await Promise.all([beforeRes.json(), afterRes.json()]);
+    if (reqSeq !== jumpRequestSeq || state.activeChannelId !== channelId) return;
+
+    if (beforeData.users) mergeUsers(beforeData.users);
+    if (afterData.users) mergeUsers(afterData.users);
+
+    const beforeOrder: string[] = beforeData.order || [];
+    const afterOrder: string[] = afterData.order || [];
+    const beforePosts = [...beforeOrder]
+      .reverse()
+      .map((id) => beforeData.posts?.[id])
+      .filter((p): p is Post => Boolean(p));
+    const afterPosts = [...afterOrder]
+      .reverse()
+      .map((id) => afterData.posts?.[id])
+      .filter((p): p is Post => Boolean(p));
+
+    const deduped = new Map<string, Post>();
+    for (const p of [...beforePosts, post, ...afterPosts]) {
+      deduped.set(p.id, p);
+    }
+    const windowPosts = [...deduped.values()].sort((a, b) => a.create_at - b.create_at);
+
+    state.posts = windowPosts;
+    state.oldestPostId = windowPosts[0]?.id ?? null;
+    state.newestPostId = windowPosts[windowPosts.length - 1]?.id ?? null;
+    state.hasMoreOlderPosts = beforeOrder.length > 0;
+    state.hasMoreNewerPosts = afterOrder.length >= contextSize;
+    state.isLoadingOlder = false;
+    state.isLoadingNewer = false;
+
+    mountMessageList();
+    (messageListHandle as MessageListHandle | null)?.scrollToPost(post.id, { instant: true });
+  } catch (err) {
+    console.error('Failed to jump to post:', err);
+  }
+};
+
+const loadNewerMessages = async () => {
+  if (
+    state.isLoadingNewer ||
+    !state.hasMoreNewerPosts ||
+    !state.newestPostId ||
+    !state.activeChannelId
+  ) {
+    return;
+  }
+
+  const channelId = state.activeChannelId;
+  const reqSeq = jumpRequestSeq;
+  state.isLoadingNewer = true;
+  messageListHandle?.setLoadingNewer(true);
+
+  try {
+    const res = await fetch(
+      `/api/channels/${channelId}/posts?after=${encodeURIComponent(state.newestPostId)}&per_page=30`
+    );
+    const data = await res.json();
+    if (reqSeq !== jumpRequestSeq || state.activeChannelId !== channelId) return;
+
+    if (data.users) {
+      mergeUsers(data.users);
+    }
+
+    const order: string[] = data.order || [];
+    const postsObj: Record<string, Post> = data.posts || {};
+
+    state.isLoadingNewer = false;
+    messageListHandle?.setLoadingNewer(false);
+
+    if (order.length === 0) {
+      state.hasMoreNewerPosts = false;
+      messageListHandle?.setHasMoreNewer(false);
+      return;
+    }
+
+    const existingIds = new Set(state.posts.map((p) => p.id));
+    const newerPosts = [...order]
+      .reverse()
+      .map((id) => postsObj[id])
+      .filter((p): p is Post => Boolean(p) && !existingIds.has(p.id));
+
+    if (newerPosts.length > 0) {
+      state.posts.push(...newerPosts);
+      state.newestPostId = state.posts[state.posts.length - 1]?.id ?? state.newestPostId;
+      patchExtractButton();
+      messageListHandle?.appendPosts(newerPosts);
+    }
+
+    if (order.length < 30) {
+      state.hasMoreNewerPosts = false;
+      messageListHandle?.setHasMoreNewer(false);
+    }
+  } catch {
+    state.isLoadingNewer = false;
+    messageListHandle?.setLoadingNewer(false);
   }
 };
 
@@ -547,6 +843,10 @@ const sendMessage = async (
 ) => {
   const filesToSend = options?.files || [];
   if ((!text && filesToSend.length === 0) || !state.activeChannelId) return;
+
+  if (state.hasMoreNewerPosts) {
+    await jumpToLatest();
+  }
 
   const channelId = state.activeChannelId;
   const retryPost = options?.retryPost;
@@ -705,29 +1005,34 @@ const connectWebSocket = () => {
           typeof document !== 'undefined' && (document.hidden || !document.hasFocus());
 
         if (isCurrentChannel) {
-          if (isFromMe) {
-            const pendingIdx = state.posts.findIndex(
-              (p) => (p.status === 'sending' || p.tempId) && p.message === post.message
-            );
-            if (pendingIdx !== -1) {
-              const tempId = state.posts[pendingIdx].tempId || state.posts[pendingIdx].id;
-              post.status = 'sent';
-              state.posts[pendingIdx] = post;
-              if (messageListHandle) {
-                messageListHandle.reconcilePost(tempId, post);
+          if (state.hasMoreNewerPosts) {
+            messageListHandle?.setHasMoreNewer(true, 'New messages available');
+          } else {
+            if (isFromMe) {
+              const pendingIdx = state.posts.findIndex(
+                (p) => (p.status === 'sending' || p.tempId) && p.message === post.message
+              );
+              if (pendingIdx !== -1) {
+                const tempId = state.posts[pendingIdx].tempId || state.posts[pendingIdx].id;
+                post.status = 'sent';
+                state.posts[pendingIdx] = post;
+                if (messageListHandle) {
+                  messageListHandle.reconcilePost(tempId, post);
+                }
+                return;
               }
-              return;
             }
-          }
 
-          if (!state.posts.some((p) => p.id === post.id)) {
-            state.posts.push(post);
-            patchExtractButton();
-            if (messageListHandle) {
-              messageListHandle.appendPost(post);
-            } else {
-              render();
-              scrollToBottom();
+            if (!state.posts.some((p) => p.id === post.id)) {
+              state.posts.push(post);
+              state.newestPostId = post.id;
+              patchExtractButton();
+              if (messageListHandle) {
+                messageListHandle.appendPost(post);
+              } else {
+                render();
+                scrollToBottom();
+              }
             }
           }
         } else if (!isFromMe) {
@@ -833,7 +1138,7 @@ window.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
     e.preventDefault();
     toggleSidebar();
-  } else if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+  } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
     if (!state.isSidebarOpen) {
       patchSidebarToggle(true);
@@ -843,12 +1148,19 @@ window.addEventListener('keydown', (e) => {
       searchInput.focus();
       searchInput.select();
     }
+  } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+    if (state.activeChannelId) {
+      e.preventDefault();
+      openSearchPanel();
+    }
   } else if (e.key === 'Escape') {
     const searchInput = document.querySelector('#sidebar-search-input') as HTMLInputElement;
     if (document.activeElement === searchInput) {
       searchInput.value = '';
       patchSidebarSearch('');
       searchInput.blur();
+    } else if (state.isSearchOpen) {
+      closeSearchPanel();
     }
   }
 });

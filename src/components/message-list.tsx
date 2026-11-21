@@ -10,12 +10,16 @@ import { MessageItem } from './message-item';
 
 export interface MessageListHandle {
   appendPost: (post: Post) => void;
+  appendPosts: (posts: Post[]) => void;
   updatePost: (post: Post) => void;
   reconcilePost: (tempId: string, serverPost: Post) => void;
   markPostFailed: (tempId: string) => void;
   prependPosts: (posts: Post[], prevScrollHeight: number, prevScrollTop: number) => void;
   setLoadingOlder: (loading: boolean) => void;
+  setLoadingNewer: (loading: boolean) => void;
+  setHasMoreNewer: (hasMore: boolean, label?: string) => void;
   scrollToBottom: () => void;
+  scrollToPost: (postId: string, options?: { instant?: boolean }) => boolean;
   getScrollContainer: () => HTMLElement | null;
   destroy: () => void;
 }
@@ -26,6 +30,9 @@ interface MessageListProps {
   currentUserId: string | undefined;
   isLoadingOlder: boolean;
   hasMoreOlderPosts: boolean;
+  isLoadingNewer?: boolean;
+  hasMoreNewerPosts?: boolean;
+  onJumpToLatest?: () => void;
   onScroll?: (e: Event) => void;
   scrollRef?: (el: HTMLElement | null) => void;
   handleRef?: (handle: MessageListHandle | null) => void;
@@ -56,6 +63,9 @@ export const MessageList = ({
   currentUserId,
   isLoadingOlder,
   hasMoreOlderPosts,
+  isLoadingNewer = false,
+  hasMoreNewerPosts = false,
+  onJumpToLatest,
   onScroll,
   scrollRef,
   handleRef,
@@ -77,7 +87,11 @@ export const MessageList = ({
   let containerEl: HTMLElement | null = null;
   let itemsContainerEl: HTMLElement | null = null;
   let loadingSpinnerEl: HTMLElement | null = null;
+  let loadingNewerEl: HTMLElement | null = null;
+  let jumpBannerEl: HTMLElement | null = null;
+  let jumpBannerLabelEl: HTMLElement | null = null;
   let stickToBottom = false;
+  let pinnedPostId: string | null = null;
   let lastScrollTop = 0;
   let isProgrammaticScroll = false;
   let resizeObserver: ResizeObserver | null = null;
@@ -119,7 +133,24 @@ export const MessageList = ({
     }
   };
 
+  const centerPinnedPost = () => {
+    if (!pinnedPostId || !containerEl || !itemsContainerEl) return;
+    const escapedId =
+      typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(pinnedPostId) : pinnedPostId;
+    const pinnedEl = itemsContainerEl.querySelector<HTMLElement>(
+      `article[data-post-id="${escapedId}"]`
+    );
+    if (!pinnedEl) return;
+    isProgrammaticScroll = true;
+    pinnedEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+    lastScrollTop = containerEl.scrollTop;
+    requestAnimationFrame(() => {
+      isProgrammaticScroll = false;
+    });
+  };
+
   const scrollToBottom = () => {
+    pinnedPostId = null;
     stickToBottom = true;
     snapToBottom();
     requestAnimationFrame(() => {
@@ -132,6 +163,10 @@ export const MessageList = ({
   const handleContainerScroll = (e: Event) => {
     if (!containerEl) return;
     const currentScrollTop = containerEl.scrollTop;
+
+    if (!isProgrammaticScroll) {
+      pinnedPostId = null;
+    }
 
     if (isNearBottom()) {
       stickToBottom = true;
@@ -160,6 +195,8 @@ export const MessageList = ({
       }
       if (stickToBottom) {
         snapToBottom();
+      } else if (pinnedPostId) {
+        centerPinnedPost();
       }
     });
 
@@ -187,6 +224,36 @@ export const MessageList = ({
 
       if (shouldStick) {
         scrollToBottom();
+      }
+    },
+
+    appendPosts: (newerPosts: Post[]) => {
+      if (newerPosts.length === 0) return;
+      pinnedPostId = null;
+
+      const fragment = document.createDocumentFragment();
+      let prev: Post | undefined = posts[posts.length - 1];
+      let lastDateKey = prev ? getDateKey(prev.create_at) : '';
+      const existingIds = new Set(posts.map((p) => p.id));
+
+      for (const post of newerPosts) {
+        if (existingIds.has(post.id)) continue;
+        existingIds.add(post.id);
+
+        const dateKey = getDateKey(post.create_at);
+        if (dateKey !== lastDateKey) {
+          fragment.appendChild(<DateDivider timestamp={post.create_at} />);
+          lastDateKey = dateKey;
+          prev = undefined;
+        }
+        const isGrouped = shouldGroupPosts(prev, post);
+        fragment.appendChild(createItem(post, isGrouped));
+        posts.push(post);
+        prev = post;
+      }
+
+      if (itemsContainerEl) {
+        itemsContainerEl.appendChild(fragment);
       }
     },
 
@@ -283,6 +350,7 @@ export const MessageList = ({
         }
       }
 
+      pinnedPostId = null;
       stickToBottom = false;
       posts.unshift(...olderPosts);
       if (itemsContainerEl) {
@@ -305,9 +373,54 @@ export const MessageList = ({
       }
     },
 
+    setLoadingNewer: (loading: boolean) => {
+      if (loadingNewerEl) {
+        loadingNewerEl.style.display = loading ? 'flex' : 'none';
+      }
+    },
+
+    setHasMoreNewer: (hasMore: boolean, label?: string) => {
+      if (jumpBannerEl) {
+        jumpBannerEl.classList.toggle('flex', hasMore);
+        jumpBannerEl.classList.toggle('hidden', !hasMore);
+      }
+      if (jumpBannerLabelEl && label) {
+        jumpBannerLabelEl.textContent = label;
+      }
+    },
+
     scrollToBottom,
+    scrollToPost: (postId: string, options?: { instant?: boolean }) => {
+      if (!containerEl || !itemsContainerEl) return false;
+      const escapedId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(postId) : postId;
+      const targetEl = itemsContainerEl.querySelector<HTMLElement>(
+        `article[data-post-id="${escapedId}"]`
+      );
+      if (!targetEl) return false;
+
+      const useInstant = Boolean(options?.instant);
+      stickToBottom = false;
+      pinnedPostId = useInstant ? postId : null;
+      isProgrammaticScroll = true;
+      targetEl.scrollIntoView({ behavior: useInstant ? 'auto' : 'smooth', block: 'center' });
+      lastScrollTop = containerEl.scrollTop;
+
+      requestAnimationFrame(() => {
+        isProgrammaticScroll = false;
+        if (pinnedPostId === postId) {
+          centerPinnedPost();
+        }
+      });
+
+      targetEl.classList.add('ring-1', 'ring-indigo-500/70', 'bg-indigo-500/15');
+      setTimeout(() => {
+        targetEl.classList.remove('ring-1', 'ring-indigo-500/70', 'bg-indigo-500/15');
+      }, 2400);
+      return true;
+    },
     getScrollContainer: () => containerEl,
     destroy: () => {
+      pinnedPostId = null;
       resizeObserver?.disconnect();
       resizeObserver = null;
     },
@@ -316,70 +429,112 @@ export const MessageList = ({
   handleRef?.(handle);
 
   return (
-    <div
-      ref={(el) => {
-        containerEl = el;
-        el?.addEventListener(
-          'load',
-          () => {
-            if (stickToBottom) {
-              snapToBottom();
-            }
-          },
-          true
-        );
-        setupObservers();
-        scrollRef?.(el);
-      }}
-      onScroll={handleContainerScroll}
-      class="flex-1 overflow-y-auto overflow-x-hidden p-6"
-    >
+    <div class="flex-1 flex flex-col min-h-0 relative">
       <div
         ref={(el) => {
-          loadingSpinnerEl = el;
+          containerEl = el;
+          el?.addEventListener(
+            'load',
+            () => {
+              if (stickToBottom) {
+                snapToBottom();
+              } else if (pinnedPostId) {
+                centerPinnedPost();
+              }
+            },
+            true
+          );
+          setupObservers();
+          scrollRef?.(el);
         }}
-        class={`py-2 flex items-center justify-center gap-2 text-xs text-zinc-500 ${
-          isLoadingOlder ? 'flex' : 'hidden'
-        }`}
+        onScroll={handleContainerScroll}
+        class="flex-1 overflow-y-auto overflow-x-hidden p-6"
       >
-        <SpinnerIcon class="size-3.5 text-indigo-400" />
-        <span>Loading older messages...</span>
+        <div
+          ref={(el) => {
+            loadingSpinnerEl = el;
+          }}
+          class={`py-2 items-center justify-center gap-2 text-xs text-zinc-500 ${
+            isLoadingOlder ? 'flex' : 'hidden'
+          }`}
+        >
+          <SpinnerIcon class="size-3.5 text-indigo-400" />
+          <span>Loading older messages...</span>
+        </div>
+
+        {!hasMoreOlderPosts && (
+          <div class="text-center py-4 border-b border-dashed border-zinc-800/80 mb-2">
+            <span class="text-[11px] text-zinc-500 font-mono tracking-wider uppercase">
+              Beginning of message history
+            </span>
+          </div>
+        )}
+
+        <div
+          ref={(el) => {
+            itemsContainerEl = el;
+            setupObservers();
+          }}
+          class="flex flex-col min-w-0"
+        >
+          {(() => {
+            const elements: HTMLElement[] = [];
+            let prev: Post | undefined = undefined;
+            let lastDateKey = '';
+
+            for (let i = 0; i < posts.length; i++) {
+              const post = posts[i];
+              const dateKey = getDateKey(post.create_at);
+              if (dateKey !== lastDateKey) {
+                elements.push(<DateDivider timestamp={post.create_at} /> as HTMLElement);
+                lastDateKey = dateKey;
+                prev = undefined;
+              }
+              const isGrouped = shouldGroupPosts(prev, post);
+              elements.push(createItem(post, isGrouped) as HTMLElement);
+              prev = post;
+            }
+            return elements;
+          })()}
+        </div>
+
+        <div
+          ref={(el) => {
+            loadingNewerEl = el;
+          }}
+          class={`py-2 items-center justify-center gap-2 text-xs text-zinc-500 ${
+            isLoadingNewer ? 'flex' : 'hidden'
+          }`}
+        >
+          <SpinnerIcon class="size-3.5 text-indigo-400" />
+          <span>Loading newer messages...</span>
+        </div>
       </div>
 
-      {!hasMoreOlderPosts && (
-        <div class="text-center py-4 border-b border-dashed border-zinc-800/80 mb-2">
-          <span class="text-[11px] text-zinc-500 font-mono tracking-wider uppercase">
-            Beginning of message history
-          </span>
-        </div>
-      )}
-
       <div
         ref={(el) => {
-          itemsContainerEl = el;
-          setupObservers();
+          jumpBannerEl = el;
         }}
-        class="flex flex-col min-w-0"
+        class={`px-4 py-2 border-t border-indigo-500/20 bg-zinc-900/95 backdrop-blur-xs items-center justify-between gap-3 text-xs shrink-0 ${
+          hasMoreNewerPosts ? 'flex' : 'hidden'
+        }`}
       >
-        {(() => {
-          const elements: HTMLElement[] = [];
-          let prev: Post | undefined = undefined;
-          let lastDateKey = '';
-
-          for (let i = 0; i < posts.length; i++) {
-            const post = posts[i];
-            const dateKey = getDateKey(post.create_at);
-            if (dateKey !== lastDateKey) {
-              elements.push(<DateDivider timestamp={post.create_at} /> as HTMLElement);
-              lastDateKey = dateKey;
-              prev = undefined;
-            }
-            const isGrouped = shouldGroupPosts(prev, post);
-            elements.push(createItem(post, isGrouped) as HTMLElement);
-            prev = post;
-          }
-          return elements;
-        })()}
+        <span
+          ref={(el) => {
+            jumpBannerLabelEl = el;
+          }}
+          class="text-zinc-300"
+        >
+          Viewing older messages
+        </span>
+        <button
+          id="jump-to-latest-button"
+          type="button"
+          onClick={onJumpToLatest}
+          class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors cursor-pointer"
+        >
+          Jump to latest
+        </button>
       </div>
     </div>
   );

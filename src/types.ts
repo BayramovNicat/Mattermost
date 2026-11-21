@@ -66,10 +66,23 @@ export interface Channel {
   name: string;
   display_name: string;
   type: 'O' | 'P' | 'D' | 'G';
+  team_id?: string;
   header?: string;
   purpose?: string;
   last_post_at?: number;
   otherUser?: User;
+}
+
+export interface SearchResultResponse {
+  order: string[];
+  posts: Record<string, Post>;
+  matches?: Record<string, string[]>;
+  users?: Record<string, User>;
+  query: string;
+  terms?: string;
+  channelId?: string | null;
+  page?: number;
+  perPage?: number;
 }
 
 export interface AppState {
@@ -79,8 +92,11 @@ export interface AppState {
   activeChannelId: string | null;
   posts: Post[];
   oldestPostId: string | null;
+  newestPostId: string | null;
   hasMoreOlderPosts: boolean;
+  hasMoreNewerPosts: boolean;
   isLoadingOlder: boolean;
+  isLoadingNewer: boolean;
   isConnected: boolean;
   typingText: string;
   errorMessage?: string | null;
@@ -89,4 +105,5 @@ export interface AppState {
   soundEnabled: boolean;
   notificationsEnabled: boolean;
   isSidebarOpen: boolean;
+  isSearchOpen: boolean;
 }
