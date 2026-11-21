@@ -83,6 +83,18 @@ const extractMessageText = (post: Post): string => {
   return '';
 };
 
+const MAX_IMAGE_WIDTH = 320;
+const MAX_IMAGE_HEIGHT = 224;
+
+const getImageDisplaySize = (width?: number, height?: number) => {
+  if (!width || !height || width <= 0 || height <= 0) return null;
+  const scale = Math.min(1, MAX_IMAGE_WIDTH / width, MAX_IMAGE_HEIGHT / height);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+};
+
 const renderAttachments = (files: FileAttachment[]) => {
   return (
     <div class="mt-2.5 flex flex-wrap gap-2 max-w-full">
@@ -91,6 +103,7 @@ const renderAttachments = (files: FileAttachment[]) => {
         const previewUrl = file.preview_url || `/api/files/${file.id}/preview`;
 
         if (file.mime_type?.startsWith('image/')) {
+          const displaySize = getImageDisplaySize(file.width, file.height);
           return (
             <a
               key={file.id}
@@ -102,8 +115,10 @@ const renderAttachments = (files: FileAttachment[]) => {
               <img
                 src={previewUrl}
                 alt={file.name}
+                width={displaySize?.width}
+                height={displaySize?.height}
                 loading="lazy"
-                class="size-full object-cover max-h-56"
+                class="block max-w-full max-h-56 h-auto object-cover"
               />
             </a>
           );

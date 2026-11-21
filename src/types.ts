@@ -15,6 +15,8 @@ export interface FileAttachment {
   extension: string;
   size: number;
   mime_type: string;
+  width?: number;
+  height?: number;
   has_preview_image?: boolean;
   preview_url?: string;
 }

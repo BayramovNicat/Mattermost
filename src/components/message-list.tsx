@@ -17,6 +17,7 @@ export interface MessageListHandle {
   setLoadingOlder: (loading: boolean) => void;
   scrollToBottom: () => void;
   getScrollContainer: () => HTMLElement | null;
+  destroy: () => void;
 }
 
 interface MessageListProps {
@@ -71,10 +72,15 @@ export const MessageList = ({
     );
   }
 
+  const BOTTOM_THRESHOLD = 60;
   const posts = [...initialPosts];
   let containerEl: HTMLElement | null = null;
   let itemsContainerEl: HTMLElement | null = null;
   let loadingSpinnerEl: HTMLElement | null = null;
+  let stickToBottom = false;
+  let lastScrollTop = 0;
+  let isProgrammaticScroll = false;
+  let resizeObserver: ResizeObserver | null = null;
 
   const createItem = (post: Post, isGrouped: boolean = false) => (
     <MessageItem
@@ -92,20 +98,80 @@ export const MessageList = ({
     return shouldGroupPosts(posts[index - 1], posts[index]);
   };
 
+  const isNearBottom = (threshold = BOTTOM_THRESHOLD): boolean => {
+    if (!containerEl) return false;
+    return containerEl.scrollHeight - containerEl.clientHeight - containerEl.scrollTop <= threshold;
+  };
+
+  const snapToBottom = () => {
+    if (!containerEl) return;
+    const prevTop = containerEl.scrollTop;
+    const targetTop = Math.max(0, containerEl.scrollHeight - containerEl.clientHeight);
+    if (Math.abs(targetTop - prevTop) > 0.5) {
+      isProgrammaticScroll = true;
+      containerEl.scrollTop = containerEl.scrollHeight;
+      lastScrollTop = containerEl.scrollTop;
+      requestAnimationFrame(() => {
+        isProgrammaticScroll = false;
+      });
+    } else {
+      lastScrollTop = containerEl.scrollTop;
+    }
+  };
+
   const scrollToBottom = () => {
+    stickToBottom = true;
+    snapToBottom();
     requestAnimationFrame(() => {
-      if (containerEl) {
-        containerEl.scrollTop = containerEl.scrollHeight;
+      if (stickToBottom) {
+        snapToBottom();
       }
     });
+  };
+
+  const handleContainerScroll = (e: Event) => {
+    if (!containerEl) return;
+    const currentScrollTop = containerEl.scrollTop;
+
+    if (isNearBottom()) {
+      stickToBottom = true;
+    } else if (currentScrollTop < lastScrollTop) {
+      stickToBottom = false;
+    }
+    lastScrollTop = currentScrollTop;
+
+    if (isProgrammaticScroll) {
+      isProgrammaticScroll = false;
+      return;
+    }
+
+    onScroll?.(e);
+  };
+
+  const setupObservers = () => {
+    if (!containerEl || !itemsContainerEl) return;
+    if (resizeObserver || typeof ResizeObserver === 'undefined') return;
+
+    resizeObserver = new ResizeObserver(() => {
+      if (!containerEl?.isConnected) {
+        resizeObserver?.disconnect();
+        resizeObserver = null;
+        return;
+      }
+      if (stickToBottom) {
+        snapToBottom();
+      }
+    });
+
+    resizeObserver.observe(itemsContainerEl);
+    resizeObserver.observe(containerEl);
   };
 
   const handle: MessageListHandle = {
     appendPost: (post: Post) => {
       if (posts.some((p) => p.id === post.id)) return;
-      const isNearBottom =
-        containerEl &&
-        containerEl.scrollTop + containerEl.clientHeight >= containerEl.scrollHeight - 100;
+      const shouldStick =
+        stickToBottom || isNearBottom(100) || post.user_id === currentUserId;
 
       const lastPost = posts[posts.length - 1];
       const needsDivider = !lastPost || !isSameDay(lastPost.create_at, post.create_at);
@@ -119,7 +185,7 @@ export const MessageList = ({
         itemsContainerEl.appendChild(createItem(post, isGrouped));
       }
 
-      if (isNearBottom) {
+      if (shouldStick) {
         scrollToBottom();
       }
     },
@@ -217,17 +283,20 @@ export const MessageList = ({
         }
       }
 
+      stickToBottom = false;
       posts.unshift(...olderPosts);
       if (itemsContainerEl) {
         itemsContainerEl.prepend(fragment);
       }
 
-      requestAnimationFrame(() => {
-        if (containerEl) {
-          containerEl.scrollTop =
-            containerEl.scrollHeight - prevScrollHeight + prevScrollTop;
-        }
-      });
+      if (containerEl) {
+        isProgrammaticScroll = true;
+        containerEl.scrollTop = containerEl.scrollHeight - prevScrollHeight + prevScrollTop;
+        lastScrollTop = containerEl.scrollTop;
+        requestAnimationFrame(() => {
+          isProgrammaticScroll = false;
+        });
+      }
     },
 
     setLoadingOlder: (loading: boolean) => {
@@ -238,6 +307,10 @@ export const MessageList = ({
 
     scrollToBottom,
     getScrollContainer: () => containerEl,
+    destroy: () => {
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+    },
   };
 
   handleRef?.(handle);
@@ -246,9 +319,19 @@ export const MessageList = ({
     <div
       ref={(el) => {
         containerEl = el;
+        el?.addEventListener(
+          'load',
+          () => {
+            if (stickToBottom) {
+              snapToBottom();
+            }
+          },
+          true
+        );
+        setupObservers();
         scrollRef?.(el);
       }}
-      onScroll={onScroll}
+      onScroll={handleContainerScroll}
       class="flex-1 overflow-y-auto overflow-x-hidden p-6"
     >
       <div
@@ -274,6 +357,7 @@ export const MessageList = ({
       <div
         ref={(el) => {
           itemsContainerEl = el;
+          setupObservers();
         }}
         class="flex flex-col min-w-0"
       >

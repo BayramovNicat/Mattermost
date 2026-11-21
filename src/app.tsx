@@ -277,6 +277,7 @@ const handleExtractChat = () => {
 };
 
 const render = () => {
+  messageListHandle?.destroy();
   updateDocumentTitle();
   const activeChannel = state.channels.find((c) => c.id === state.activeChannelId);
 
@@ -406,6 +407,7 @@ const selectChannel = async (channelId: string) => {
   try {
     const res = await fetch(`/api/channels/${channelId}/posts?per_page=30`);
     const data = await res.json();
+    if (state.activeChannelId !== channelId) return;
 
     if (data.users) {
       for (const uid in data.users) {
