@@ -537,10 +537,16 @@ export function startServer(port = PORT): Server<unknown> {
     },
 
     websocket: {
+      idleTimeout: 0,
+      sendPings: true,
       open(ws) {
         ws.subscribe(TOPIC_CHAT);
       },
-      message() {},
+      message(ws, raw) {
+        if (typeof raw === 'string' && raw.includes('"ping"')) {
+          ws.send('{"type":"pong"}');
+        }
+      },
       close(ws) {
         ws.unsubscribe(TOPIC_CHAT);
       },

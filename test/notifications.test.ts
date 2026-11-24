@@ -37,6 +37,58 @@ describe('notification service', () => {
       })
     ).toBeNull();
   });
+
+  test('passes renotify: true when tag is set and handles onclick', () => {
+    const originalWindow = globalThis.window;
+    const originalNotification = globalThis.Notification;
+    const calls: Array<{ title: string; options: NotificationOptions & { renotify?: boolean } }> = [];
+    let closed = false;
+    let focused = false;
+    let clicked = false;
+
+    class MockNotification {
+      static permission: NotificationPermission = 'granted';
+      onclick: (() => void) | null = null;
+      constructor(title: string, options: NotificationOptions & { renotify?: boolean }) {
+        calls.push({ title, options });
+      }
+      close() {
+        closed = true;
+      }
+    }
+
+    (globalThis as unknown as { window: unknown }).window = {
+      Notification: MockNotification,
+      focus: () => {
+        focused = true;
+      },
+    };
+    (globalThis as unknown as { Notification: unknown }).Notification = MockNotification;
+
+    try {
+      const notif = showDesktopNotification({
+        title: 'General - @alice',
+        body: 'Hello there',
+        tag: 'channel-1',
+        onClick: () => {
+          clicked = true;
+        },
+      });
+      expect(notif).not.toBeNull();
+      expect(calls).toHaveLength(1);
+      expect(calls[0].options.renotify).toBe(true);
+      expect(calls[0].options.tag).toBe('channel-1');
+      expect(closed).toBe(false);
+
+      notif?.onclick?.({} as Event);
+      expect(focused).toBe(true);
+      expect(clicked).toBe(true);
+      expect(closed).toBe(true);
+    } finally {
+      (globalThis as unknown as { window: unknown }).window = originalWindow;
+      (globalThis as unknown as { Notification: unknown }).Notification = originalNotification;
+    }
+  });
 });
 
 describe('sound service', () => {

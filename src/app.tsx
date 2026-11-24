@@ -21,6 +21,7 @@ const root = document.querySelector('#app') as HTMLElement;
 const usersMap = new Map<string, User>();
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let wsHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let typingTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimer: ReturnType<typeof setTimeout> | null = null;
 let scrollContainer: HTMLElement | null = null;
@@ -970,11 +971,20 @@ const connectWebSocket = () => {
 
   ws.onopen = () => {
     patchConnectionStatus(true);
+    if (wsHeartbeatTimer) clearInterval(wsHeartbeatTimer);
+    wsHeartbeatTimer = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        } catch {}
+      }
+    }, 25000);
   };
 
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
+      if (data.type === 'pong') return;
       if (data.event === 'posted') {
         const post: Post =
           typeof data.data?.post === 'string' ? JSON.parse(data.data.post) : data.data?.post;
@@ -1123,6 +1133,10 @@ const connectWebSocket = () => {
   };
 
   ws.onclose = () => {
+    if (wsHeartbeatTimer) {
+      clearInterval(wsHeartbeatTimer);
+      wsHeartbeatTimer = null;
+    }
     ws = null;
     patchConnectionStatus(false);
     if (!reconnectTimer) {
@@ -1133,6 +1147,22 @@ const connectWebSocket = () => {
     }
   };
 };
+
+const ensureWebSocketConnected = () => {
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    connectWebSocket();
+  }
+};
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', ensureWebSocketConnected);
+  window.addEventListener('focus', ensureWebSocketConnected);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      ensureWebSocketConnected();
+    }
+  });
+}
 
 window.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {

@@ -52,23 +52,19 @@ export const showDesktopNotification = ({
   }
 
   try {
-    const notification = new Notification(title, {
+    const options: NotificationOptions & { renotify?: boolean } = {
       body,
       tag,
       icon: '/favicon.ico',
-    });
+      renotify: Boolean(tag),
+    };
+    const notification = new Notification(title, options);
 
-    if (onClick) {
-      notification.onclick = () => {
-        window.focus();
-        onClick();
-        notification.close();
-      };
-    }
-
-    setTimeout(() => {
+    notification.onclick = () => {
+      window.focus();
+      onClick?.();
       notification.close();
-    }, 5000);
+    };
 
     return notification;
   } catch {
