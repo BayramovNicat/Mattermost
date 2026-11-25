@@ -6,6 +6,7 @@ import { PaperclipIcon, SearchIcon, SpinnerIcon, XIcon } from './icons';
 
 export interface SearchPanelHandle {
   focus: () => void;
+  removePost: (postId: string) => void;
   destroy: () => void;
 }
 
@@ -412,6 +413,16 @@ export const SearchPanel = ({
       if (inputEl) {
         inputEl.focus();
         inputEl.select();
+      }
+    },
+    removePost: (postId: string) => {
+      const prevLen = results.length;
+      results = results.filter((p) => p.id !== postId);
+      if (results.length !== prevLen) {
+        delete matchesMap[postId];
+        if (activeResultId === postId) activeResultId = null;
+        if (jumpingPostId === postId) jumpingPostId = null;
+        renderBody();
       }
     },
     destroy: () => {

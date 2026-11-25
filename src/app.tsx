@@ -1,5 +1,6 @@
 import './style.css';
 import { ChatHeader } from './components/chat-header';
+import { DeleteModal } from './components/delete-modal';
 import { ExtractModal } from './components/extract-modal';
 import { BellIcon, BellOffIcon } from './components/icons';
 import { MessageInput } from './components/message-input';
@@ -334,8 +335,71 @@ const createMessageList = () => (
     onRetry={(failedPost) => {
       sendMessage(failedPost.message, { retryPost: failedPost });
     }}
+    onDelete={(post) => {
+      requestDeletePost(post);
+    }}
   />
 );
+
+const removePostFromState = (postId: string) => {
+  const idx = state.posts.findIndex((p) => p.id === postId || p.tempId === postId);
+  if (idx === -1) {
+    searchPanelHandle?.removePost(postId);
+    return;
+  }
+
+  state.posts.splice(idx, 1);
+  state.oldestPostId = state.posts[0]?.id ?? null;
+  state.newestPostId = state.posts[state.posts.length - 1]?.id ?? null;
+  patchExtractButton();
+  searchPanelHandle?.removePost(postId);
+
+  if (state.posts.length === 0 || !messageListHandle) {
+    mountMessageList();
+  } else {
+    messageListHandle.removePost(postId);
+  }
+};
+
+const requestDeletePost = (post: Post) => {
+  const existingModal = document.querySelector('#delete-message-modal');
+  if (existingModal) {
+    existingModal.remove();
+  }
+
+  let modalEl: HTMLElement | null = null;
+  const closeModal = () => {
+    if (modalEl) {
+      modalEl.remove();
+      modalEl = null;
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (post.status === 'failed' || post.id.startsWith('temp_')) {
+      removePostFromState(post.id);
+      closeModal();
+      return;
+    }
+
+    const res = await fetch(`/api/posts/${encodeURIComponent(post.id)}`, {
+      method: 'DELETE',
+    });
+
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(data?.error || `Failed to delete message (${res.status})`);
+    }
+
+    removePostFromState(post.id);
+    closeModal();
+  };
+
+  modalEl = (
+    <DeleteModal post={post} onConfirm={confirmDelete} onClose={closeModal} />
+  ) as HTMLElement;
+  document.body.appendChild(modalEl);
+};
 
 const mountMessageList = () => {
   messageListHandle?.destroy();
@@ -1110,6 +1174,16 @@ const connectWebSocket = () => {
             }
           }
         }
+      } else if (data.event === 'post_deleted') {
+        const post: Post | undefined =
+          typeof data.data?.post === 'string' ? JSON.parse(data.data.post) : data.data?.post;
+        const postId =
+          post?.id || (typeof data.data?.post_id === 'string' ? data.data.post_id : '');
+        if (!postId) return;
+        const channelId = post?.channel_id || data.broadcast?.channel_id;
+        if (!channelId || channelId === state.activeChannelId) {
+          removePostFromState(postId);
+        }
       } else if (data.event === 'typing') {
         if (data.broadcast?.channel_id === state.activeChannelId && data.data?.parent_id === '') {
           patchTypingIndicator('Someone is typing...');
@@ -1184,6 +1258,7 @@ window.addEventListener('keydown', (e) => {
       openSearchPanel();
     }
   } else if (e.key === 'Escape') {
+    if (document.querySelector('#delete-message-modal')) return;
     const searchInput = document.querySelector('#sidebar-search-input') as HTMLInputElement;
     if (document.activeElement === searchInput) {
       searchInput.value = '';

@@ -62,8 +62,13 @@ export function startServerWithFallback(
   );
 }
 
-export function startServer(port = PORT): Server<unknown> {
-  const api = new MattermostAPI();
+export interface StartServerOptions {
+  api?: MattermostAPI;
+  enableWebSocket?: boolean;
+}
+
+export function startServer(port = PORT, options: StartServerOptions = {}): Server<unknown> {
+  const api = options.api ?? new MattermostAPI();
   let serverInstance: Server<unknown> | null = null;
   let defaultTeamId = '';
   const channelMetaCache = new Map<
@@ -250,12 +255,15 @@ export function startServer(port = PORT): Server<unknown> {
     }
   };
 
-  const mmWs = new MattermostWebSocketClient((event: WebSocketMessage) => {
-    if (serverInstance) {
-      serverInstance.publish(TOPIC_CHAT, JSON.stringify(event));
-    }
-  });
-  mmWs.connect();
+  const mmWs =
+    options.enableWebSocket === false
+      ? null
+      : new MattermostWebSocketClient((event: WebSocketMessage) => {
+          if (serverInstance) {
+            serverInstance.publish(TOPIC_CHAT, JSON.stringify(event));
+          }
+        });
+  mmWs?.connect();
 
   const browserDir = getBrowserDir();
 
@@ -429,6 +437,20 @@ export function startServer(port = PORT): Server<unknown> {
             const message = err instanceof Error ? err.message : String(err);
             return Response.json({ error: message }, { status: 500 });
           }
+        }
+      }
+
+      const postMatch = url.pathname.match(/^\/api\/posts\/([^/]+)$/);
+      if (postMatch && req.method === 'DELETE') {
+        try {
+          const postId = decodeURIComponent(postMatch[1]);
+          const result = await api.deletePost(postId);
+          return Response.json(result);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          const statusMatch = message.match(/Mattermost API Error \((\d+)\)/);
+          const status = statusMatch ? Number.parseInt(statusMatch[1], 10) : 500;
+          return Response.json({ error: message }, { status });
         }
       }
 

@@ -12,11 +12,13 @@ const userStatusCache = new Map<string, string>();
 export class MattermostAPI {
   private session: MattermostSession;
 
-  constructor() {
-    this.session = getMattermostSession();
-    onSessionChange(() => {
-      this.refreshSession();
-    });
+  constructor(initialSession?: MattermostSession) {
+    this.session = initialSession ?? getMattermostSession();
+    if (!initialSession) {
+      onSessionChange(() => {
+        this.refreshSession();
+      });
+    }
   }
 
   refreshSession(): void {
@@ -145,6 +147,17 @@ export class MattermostAPI {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  }
+
+  async deletePost(postId: string): Promise<{ status: string }> {
+    const res = await this.request<{ status?: string } | Response>(
+      `/posts/${encodeURIComponent(postId)}`,
+      { method: 'DELETE' }
+    );
+    if (res instanceof Response) {
+      return { status: 'OK' };
+    }
+    return { status: res?.status || 'OK' };
   }
 
   async getUser(userId: string): Promise<{ id: string; username: string; first_name?: string; last_name?: string; email?: string }> {

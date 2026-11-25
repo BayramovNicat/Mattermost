@@ -1,6 +1,6 @@
 import type { FileAttachment, Post, User } from '../types';
 import { UserAvatar } from './avatar';
-import { AlertCircleIcon, ClockIcon, PaperclipIcon } from './icons';
+import { AlertCircleIcon, ClockIcon, PaperclipIcon, TrashIcon } from './icons';
 
 interface MessageItemProps {
   post: Post;
@@ -8,6 +8,7 @@ interface MessageItemProps {
   isMe: boolean;
   isGrouped?: boolean;
   onRetry?: (post: Post) => void;
+  onDelete?: (post: Post) => void;
 }
 
 const timeFormatter = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
@@ -140,7 +141,34 @@ const renderAttachments = (files: FileAttachment[]) => {
   );
 };
 
-export const MessageItem = ({ post, author, isMe, isGrouped = false, onRetry }: MessageItemProps) => {
+const renderActionToolbar = (post: Post, onDelete?: (post: Post) => void) => {
+  if (!onDelete) return null;
+  return (
+    <div class="absolute right-2 -top-2.5 z-10 flex items-center gap-0.5 rounded-lg border border-zinc-800 bg-zinc-900/95 p-0.5 shadow-sm opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto transition-opacity">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete(post);
+        }}
+        class="size-6 rounded-md flex items-center justify-center text-zinc-400 hover:text-rose-400 hover:bg-rose-500/15 transition-colors cursor-pointer"
+        title="Delete message"
+        aria-label="Delete message"
+      >
+        <TrashIcon class="size-3.5" />
+      </button>
+    </div>
+  );
+};
+
+export const MessageItem = ({
+  post,
+  author,
+  isMe,
+  isGrouped = false,
+  onRetry,
+  onDelete,
+}: MessageItemProps) => {
   const authorName =
     post.props?.override_username ||
     author?.display_name ||
@@ -161,11 +189,12 @@ export const MessageItem = ({ post, author, isMe, isGrouped = false, onRetry }: 
         }));
   const isSending = post.status === 'sending';
   const isFailed = post.status === 'failed';
+  const canDelete = (isMe || isFailed) && !isSending && !post.type?.startsWith('system_');
   const messageText = extractMessageText(post);
 
   if (isGrouped) {
     const containerClasses = [
-      'flex gap-3 items-start min-w-0 max-w-full px-2 py-0.5 -mx-2 rounded-lg transition-all group mt-0.5',
+      'relative flex gap-3 items-start min-w-0 max-w-full px-2 py-0.5 -mx-2 rounded-lg transition-all group mt-0.5',
       isSending ? 'opacity-70' : 'hover:bg-zinc-800/30',
       isFailed ? 'border-l-2 border-rose-500 pl-2 bg-rose-500/5' : '',
     ]
@@ -174,6 +203,7 @@ export const MessageItem = ({ post, author, isMe, isGrouped = false, onRetry }: 
 
     return (
       <article data-post-id={post.id} class={containerClasses}>
+        {canDelete && renderActionToolbar(post, onDelete)}
         <div class="w-9 shrink-0 flex items-center justify-end pr-1 select-none pt-0.5 min-h-4">
           {isSending ? (
             <ClockIcon class="size-3.5 animate-pulse text-indigo-400" />
@@ -222,7 +252,7 @@ export const MessageItem = ({ post, author, isMe, isGrouped = false, onRetry }: 
   }
 
   const containerClasses = [
-    'flex gap-3 items-start min-w-0 max-w-full px-2 py-1 -mx-2 rounded-lg transition-all group mt-3.5 first:mt-0',
+    'relative flex gap-3 items-start min-w-0 max-w-full px-2 py-1 -mx-2 rounded-lg transition-all group mt-3.5 first:mt-0',
     isSending ? 'opacity-70' : 'hover:bg-zinc-800/30',
     isFailed ? 'border-l-2 border-rose-500 pl-2 bg-rose-500/5' : '',
   ]
@@ -231,6 +261,7 @@ export const MessageItem = ({ post, author, isMe, isGrouped = false, onRetry }: 
 
   return (
     <article data-post-id={post.id} class={containerClasses}>
+      {canDelete && renderActionToolbar(post, onDelete)}
       <UserAvatar
         userId={post.user_id}
         name={authorName}

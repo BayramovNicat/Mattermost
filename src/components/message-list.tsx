@@ -12,6 +12,7 @@ export interface MessageListHandle {
   appendPost: (post: Post) => void;
   appendPosts: (posts: Post[]) => void;
   updatePost: (post: Post) => void;
+  removePost: (postId: string) => void;
   reconcilePost: (tempId: string, serverPost: Post) => void;
   markPostFailed: (tempId: string) => void;
   prependPosts: (posts: Post[], prevScrollHeight: number, prevScrollTop: number) => void;
@@ -37,6 +38,7 @@ interface MessageListProps {
   scrollRef?: (el: HTMLElement | null) => void;
   handleRef?: (handle: MessageListHandle | null) => void;
   onRetry?: (post: Post) => void;
+  onDelete?: (post: Post) => void;
 }
 
 export const DateDivider = ({ timestamp }: { timestamp: number }) => {
@@ -70,6 +72,7 @@ export const MessageList = ({
   scrollRef,
   handleRef,
   onRetry,
+  onDelete,
 }: MessageListProps) => {
   if (initialPosts.length === 0) {
     scrollRef?.(null);
@@ -104,8 +107,15 @@ export const MessageList = ({
       isMe={post.user_id === currentUserId}
       isGrouped={isGrouped}
       onRetry={onRetry}
+      onDelete={onDelete}
     />
   );
+
+  const findPostArticle = (postId: string): HTMLElement | null => {
+    if (!itemsContainerEl) return null;
+    const escapedId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(postId) : postId;
+    return itemsContainerEl.querySelector<HTMLElement>(`article[data-post-id="${escapedId}"]`);
+  };
 
   const isPostGroupedAtIndex = (index: number): boolean => {
     if (index <= 0) return false;
@@ -261,15 +271,42 @@ export const MessageList = ({
       const idx = posts.findIndex((p) => p.id === updatedPost.id);
       if (idx !== -1) {
         posts[idx] = updatedPost;
-        if (itemsContainerEl) {
-          const existingEl = itemsContainerEl.querySelector(`article[data-post-id="${updatedPost.id}"]`);
-          if (existingEl) {
-            const isGrouped = isPostGroupedAtIndex(idx);
-            existingEl.replaceWith(createItem(updatedPost, isGrouped));
-          }
+        const existingEl = findPostArticle(updatedPost.id);
+        if (existingEl) {
+          const isGrouped = isPostGroupedAtIndex(idx);
+          existingEl.replaceWith(createItem(updatedPost, isGrouped));
         }
       } else {
         handle.appendPost(updatedPost);
+      }
+    },
+
+    removePost: (postId: string) => {
+      const idx = posts.findIndex((p) => p.id === postId || p.tempId === postId);
+      if (idx === -1) return;
+
+      const [removedPost] = posts.splice(idx, 1);
+      if (pinnedPostId === postId || pinnedPostId === removedPost.id) {
+        pinnedPostId = null;
+      }
+
+      if (itemsContainerEl) {
+        findPostArticle(removedPost.id)?.remove();
+
+        const removedDateKey = getDateKey(removedPost.create_at);
+        const hasRemainingOnDay = posts.some((p) => getDateKey(p.create_at) === removedDateKey);
+        if (!hasRemainingOnDay) {
+          itemsContainerEl.querySelector(`[data-date-divider="${removedDateKey}"]`)?.remove();
+        }
+
+        if (idx < posts.length) {
+          const nextPost = posts[idx];
+          const nextEl = findPostArticle(nextPost.id);
+          if (nextEl) {
+            const isGrouped = isPostGroupedAtIndex(idx);
+            nextEl.replaceWith(createItem(nextPost, isGrouped));
+          }
+        }
       }
     },
 
@@ -281,13 +318,11 @@ export const MessageList = ({
         posts.push(serverPost);
       }
 
-      if (itemsContainerEl) {
-        const existingEl = itemsContainerEl.querySelector(`article[data-post-id="${tempId}"]`);
-        if (existingEl) {
-          const targetIdx = posts.findIndex((p) => p.id === serverPost.id);
-          const isGrouped = isPostGroupedAtIndex(targetIdx);
-          existingEl.replaceWith(createItem(serverPost, isGrouped));
-        }
+      const existingEl = findPostArticle(tempId);
+      if (existingEl) {
+        const targetIdx = posts.findIndex((p) => p.id === serverPost.id);
+        const isGrouped = isPostGroupedAtIndex(targetIdx);
+        existingEl.replaceWith(createItem(serverPost, isGrouped));
       }
     },
 
@@ -296,12 +331,10 @@ export const MessageList = ({
       if (idx !== -1) {
         posts[idx].status = 'failed';
         const failedPost = posts[idx];
-        if (itemsContainerEl) {
-          const existingEl = itemsContainerEl.querySelector(`article[data-post-id="${tempId}"]`);
-          if (existingEl) {
-            const isGrouped = isPostGroupedAtIndex(idx);
-            existingEl.replaceWith(createItem(failedPost, isGrouped));
-          }
+        const existingEl = findPostArticle(tempId);
+        if (existingEl) {
+          const isGrouped = isPostGroupedAtIndex(idx);
+          existingEl.replaceWith(createItem(failedPost, isGrouped));
         }
       }
     },
@@ -392,10 +425,7 @@ export const MessageList = ({
     scrollToBottom,
     scrollToPost: (postId: string, options?: { instant?: boolean }) => {
       if (!containerEl || !itemsContainerEl) return false;
-      const escapedId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(postId) : postId;
-      const targetEl = itemsContainerEl.querySelector<HTMLElement>(
-        `article[data-post-id="${escapedId}"]`
-      );
+      const targetEl = findPostArticle(postId);
       if (!targetEl) return false;
 
       const useInstant = Boolean(options?.instant);
