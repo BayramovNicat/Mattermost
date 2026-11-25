@@ -1,11 +1,39 @@
-import type { PendingFile } from '../types';
-import { FileIcon, PaperclipIcon, SendIcon, XIcon } from './icons';
+import type { PendingFile, Post } from '../types';
+import { FileIcon, PaperclipIcon, ReplyIcon, SendIcon, XIcon } from './icons';
+
+export interface MessageInputHandle {
+  setReplyTarget: (post: Post | null, authorName?: string) => void;
+  focus: () => void;
+}
 
 interface MessageInputProps {
   typingText: string;
   errorMessage?: string | null;
+  replyingToPost?: Post | null;
+  replyAuthorName?: string;
+  onCancelReply?: () => void;
+  handleRef?: (handle: MessageInputHandle | null) => void;
   onSend: (text: string, files?: File[]) => void;
 }
+
+const getReplySnippet = (post: Post): string => {
+  if (post.message?.trim()) {
+    return post.message.trim().replace(/\s+/g, ' ');
+  }
+  if (post.props?.attachments && post.props.attachments.length > 0) {
+    const text = post.props.attachments
+      .map((a) => [a.title, a.text || a.fallback || a.pretext].filter(Boolean).join(' '))
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ');
+    if (text) return text;
+  }
+  const fileCount = post.metadata?.files?.length || post.file_ids?.length || 0;
+  if (fileCount > 0) {
+    return `${fileCount} ${fileCount === 1 ? 'attachment' : 'attachments'}`;
+  }
+  return '(empty message)';
+};
 
 export const formatFileSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
@@ -13,12 +41,78 @@ export const formatFileSize = (bytes: number): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-export const MessageInput = ({ typingText, errorMessage, onSend }: MessageInputProps) => {
+export const MessageInput = ({
+  typingText,
+  errorMessage,
+  replyingToPost = null,
+  replyAuthorName = '',
+  onCancelReply,
+  handleRef,
+  onSend,
+}: MessageInputProps) => {
   let pendingFiles: PendingFile[] = [];
+  let currentReplyPost: Post | null = replyingToPost;
+  let currentReplyAuthor = replyAuthorName;
   let fileInputEl: HTMLInputElement | null = null;
+  let textareaEl: HTMLTextAreaElement | null = null;
+  let replyPreviewEl: HTMLElement | null = null;
   let attachmentsContainerEl: HTMLElement | null = null;
   let dropOverlayEl: HTMLElement | null = null;
   let dragCounter = 0;
+
+  const renderReplyPreview = () => {
+    if (!replyPreviewEl) return;
+    if (!currentReplyPost) {
+      replyPreviewEl.replaceChildren();
+      replyPreviewEl.classList.add('hidden');
+      return;
+    }
+
+    replyPreviewEl.classList.remove('hidden');
+    const authorLabel = currentReplyAuthor || 'user';
+    const snippet = getReplySnippet(currentReplyPost);
+
+    replyPreviewEl.replaceChildren(
+      <div class="flex items-center gap-2 min-w-0 flex-1">
+        <ReplyIcon class="size-3.5 text-indigo-400 shrink-0" />
+        <div class="min-w-0 flex-1">
+          <div class="text-[11px] font-medium text-indigo-300 truncate">
+            Replying to {authorLabel}
+          </div>
+          <div class="text-[11px] text-zinc-400 truncate">{snippet}</div>
+        </div>
+      </div>,
+      <button
+        id="chat-reply-cancel-btn"
+        type="button"
+        onClick={() => {
+          currentReplyPost = null;
+          currentReplyAuthor = '';
+          renderReplyPreview();
+          onCancelReply?.();
+        }}
+        class="size-6 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+        title="Cancel reply (Esc)"
+        aria-label="Cancel reply"
+      >
+        <XIcon class="size-3.5" />
+      </button>
+    );
+  };
+
+  handleRef?.({
+    setReplyTarget: (post: Post | null, authorName?: string) => {
+      currentReplyPost = post;
+      currentReplyAuthor = authorName || '';
+      renderReplyPreview();
+      if (post) {
+        textareaEl?.focus();
+      }
+    },
+    focus: () => {
+      textareaEl?.focus();
+    },
+  });
 
   const renderAttachments = () => {
     if (!attachmentsContainerEl) return;
@@ -112,6 +206,10 @@ export const MessageInput = ({ typingText, errorMessage, onSend }: MessageInputP
     }
     pendingFiles = [];
     renderAttachments();
+
+    currentReplyPost = null;
+    currentReplyAuthor = '';
+    renderReplyPreview();
 
     onSend(text, filesToSend);
     form.reset();
@@ -229,6 +327,15 @@ export const MessageInput = ({ typingText, errorMessage, onSend }: MessageInputP
 
         <div
           ref={(el) => {
+            replyPreviewEl = el;
+            renderReplyPreview();
+          }}
+          id="chat-reply-preview"
+          class="hidden flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-zinc-950/80 border border-zinc-800/90 border-l-2 border-l-indigo-500 text-xs"
+        />
+
+        <div
+          ref={(el) => {
             attachmentsContainerEl = el;
           }}
           id="chat-attachments-preview"
@@ -236,6 +343,9 @@ export const MessageInput = ({ typingText, errorMessage, onSend }: MessageInputP
         />
 
         <textarea
+          ref={(el) => {
+            textareaEl = el;
+          }}
           id="chat-message-input"
           name="message"
           rows={1}

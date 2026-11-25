@@ -3,7 +3,7 @@ import { ChatHeader } from './components/chat-header';
 import { DeleteModal } from './components/delete-modal';
 import { ExtractModal } from './components/extract-modal';
 import { BellIcon, BellOffIcon } from './components/icons';
-import { MessageInput } from './components/message-input';
+import { MessageInput, type MessageInputHandle } from './components/message-input';
 import { MessageList, type MessageListHandle } from './components/message-list';
 import { SearchPanel, type SearchPanelHandle } from './components/search-panel';
 import { Sidebar } from './components/sidebar';
@@ -20,6 +20,8 @@ import { extractChatData } from './utils/chat-extractor';
 
 const root = document.querySelector('#app') as HTMLElement;
 const usersMap = new Map<string, User>();
+const postsMap = new Map<string, Post>();
+const pendingPostFetches = new Set<string>();
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wsHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -28,6 +30,7 @@ let errorTimer: ReturnType<typeof setTimeout> | null = null;
 let scrollContainer: HTMLElement | null = null;
 let messageListSlotEl: HTMLElement | null = null;
 let messageListHandle: MessageListHandle | null = null;
+let messageInputHandle: MessageInputHandle | null = null;
 let searchSlotEl: HTMLElement | null = null;
 let searchPanelHandle: SearchPanelHandle | null = null;
 let scrollRafPending = false;
@@ -65,6 +68,7 @@ const state: AppState = {
   notificationsEnabled: initialNotificationsEnabled,
   isSidebarOpen: initialSidebarOpen,
   isSearchOpen: false,
+  replyingToPost: null,
 };
 
 const updateDocumentTitle = () => {
@@ -313,9 +317,104 @@ const mergeUsers = (incomingUsers: Record<string, User>) => {
   }
 };
 
-const createMessageList = () => (
-  <MessageList
-    posts={state.posts}
+const getPostAuthorName = (post: Post, fallbackSenderName?: unknown): string => {
+  const author = usersMap.get(post.user_id);
+  return (
+    post.props?.override_username ||
+    author?.display_name ||
+    author?.username ||
+    (fallbackSenderName ? String(fallbackSenderName).replace(/^@/, '') : 'user')
+  );
+};
+
+const setReplyingToPost = (post: Post | null) => {
+  state.replyingToPost = post;
+  messageInputHandle?.setReplyTarget(post, post ? getPostAuthorName(post) : undefined);
+};
+
+const cachePosts = (
+  postsObj?: Record<string, Post>,
+  referencedPosts?: Record<string, Post>
+) => {
+  if (postsObj) {
+    for (const id of Object.keys(postsObj)) {
+      const post = postsObj[id];
+      if (post?.id) {
+        postsMap.set(post.id, post);
+      }
+    }
+  }
+  if (referencedPosts) {
+    for (const id of Object.keys(referencedPosts)) {
+      const post = referencedPosts[id];
+      if (post?.id) {
+        postsMap.set(post.id, post);
+      }
+    }
+  }
+};
+
+const fetchReferencedPost = async (rootId: string): Promise<Post | null> => {
+  if (!rootId) return null;
+  const cached = postsMap.get(rootId);
+  if (cached) return cached;
+  if (pendingPostFetches.has(rootId)) return null;
+
+  pendingPostFetches.add(rootId);
+  try {
+    const res = await fetch(`/api/posts/${encodeURIComponent(rootId)}?include_users=1`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as
+      | (Post & { post?: never; users?: never })
+      | { post?: Post; users?: Record<string, User> };
+    const fetchedPost = 'post' in data && data.post ? data.post : ('id' in data ? (data as Post) : null);
+    if (!fetchedPost?.id) return null;
+    if ('users' in data && data.users) {
+      mergeUsers(data.users);
+    }
+    postsMap.set(fetchedPost.id, fetchedPost);
+    for (const loadedPost of state.posts) {
+      if (loadedPost.root_id === fetchedPost.id) {
+        messageListHandle?.updatePost(loadedPost);
+      }
+    }
+    return fetchedPost;
+  } catch {
+    return null;
+  } finally {
+    pendingPostFetches.delete(rootId);
+  }
+};
+
+const fetchMissingRootPosts = (posts: Post[]) => {
+  for (const post of posts) {
+    if (post.root_id && !postsMap.has(post.root_id)) {
+      fetchReferencedPost(post.root_id);
+    }
+  }
+};
+
+const jumpToRootPost = async (rootId: string) => {
+  if (!rootId) return;
+  if (state.posts.some((p) => p.id === rootId) && messageListHandle?.scrollToPost(rootId)) {
+    return;
+  }
+  const targetPost = postsMap.get(rootId) || (await fetchReferencedPost(rootId));
+  if (targetPost) {
+    await jumpToPost(targetPost);
+  }
+};
+
+const createMessageList = () => {
+  for (const p of state.posts) {
+    if (p?.id) {
+      postsMap.set(p.id, p);
+    }
+  }
+  return (
+    <MessageList
+      posts={state.posts}
+    postsMap={postsMap}
     usersMap={usersMap}
     currentUserId={state.currentUser?.id}
     isLoadingOlder={state.isLoadingOlder}
@@ -338,13 +437,30 @@ const createMessageList = () => (
     onDelete={(post) => {
       requestDeletePost(post);
     }}
+    onReply={(post) => {
+      setReplyingToPost(post);
+    }}
+    onJumpToRoot={(rootId) => {
+      jumpToRootPost(rootId);
+    }}
   />
-);
+  );
+};
 
 const removePostFromState = (postId: string) => {
+  postsMap.delete(postId);
+  if (state.replyingToPost?.id === postId) {
+    setReplyingToPost(null);
+  }
+
   const idx = state.posts.findIndex((p) => p.id === postId || p.tempId === postId);
   if (idx === -1) {
     searchPanelHandle?.removePost(postId);
+    for (const p of state.posts) {
+      if (p.root_id === postId) {
+        messageListHandle?.updatePost(p);
+      }
+    }
     return;
   }
 
@@ -358,6 +474,11 @@ const removePostFromState = (postId: string) => {
     mountMessageList();
   } else {
     messageListHandle.removePost(postId);
+    for (const p of state.posts) {
+      if (p.root_id === postId) {
+        messageListHandle.updatePost(p);
+      }
+    }
   }
 };
 
@@ -522,6 +643,16 @@ const render = () => {
             <MessageInput
               typingText={state.typingText}
               errorMessage={state.errorMessage}
+              replyingToPost={state.replyingToPost}
+              replyAuthorName={
+                state.replyingToPost ? getPostAuthorName(state.replyingToPost) : ''
+              }
+              onCancelReply={() => {
+                state.replyingToPost = null;
+              }}
+              handleRef={(handle) => {
+                messageInputHandle = handle;
+              }}
               onSend={(text, files) => {
                 sendMessage(text, { files });
               }}
@@ -601,6 +732,7 @@ const selectChannel = async (channelId: string) => {
   updateDocumentTitle();
 
   state.posts = [];
+  postsMap.clear();
   state.oldestPostId = null;
   state.newestPostId = null;
   state.hasMoreOlderPosts = true;
@@ -609,6 +741,7 @@ const selectChannel = async (channelId: string) => {
   state.isLoadingNewer = false;
   state.typingText = '';
   state.errorMessage = null;
+  state.replyingToPost = null;
   jumpRequestSeq++;
   render();
 
@@ -623,11 +756,13 @@ const selectChannel = async (channelId: string) => {
 
     const order: string[] = data.order || [];
     const postsObj: Record<string, Post> = data.posts || {};
+    cachePosts(postsObj, data.referenced_posts);
 
     if (order.length > 0) {
       state.oldestPostId = order[order.length - 1];
       state.posts = [...order].reverse().map((id) => postsObj[id]).filter(Boolean);
       state.newestPostId = state.posts[state.posts.length - 1]?.id ?? null;
+      fetchMissingRootPosts(state.posts);
     } else {
       state.hasMoreOlderPosts = false;
     }
@@ -655,6 +790,7 @@ const jumpToLatest = async () => {
 
     const order: string[] = data.order || [];
     const postsObj: Record<string, Post> = data.posts || {};
+    cachePosts(postsObj, data.referenced_posts);
 
     state.isLoadingOlder = false;
     state.isLoadingNewer = false;
@@ -665,6 +801,7 @@ const jumpToLatest = async () => {
       state.posts = [...order].reverse().map((id) => postsObj[id]).filter(Boolean);
       state.newestPostId = state.posts[state.posts.length - 1]?.id ?? null;
       state.hasMoreOlderPosts = true;
+      fetchMissingRootPosts(state.posts);
     } else {
       state.posts = [];
       state.oldestPostId = null;
@@ -704,6 +841,9 @@ const jumpToPost = async (post: Post) => {
 
     if (beforeData.users) mergeUsers(beforeData.users);
     if (afterData.users) mergeUsers(afterData.users);
+    cachePosts(beforeData.posts, beforeData.referenced_posts);
+    cachePosts(afterData.posts, afterData.referenced_posts);
+    postsMap.set(post.id, post);
 
     const beforeOrder: string[] = beforeData.order || [];
     const afterOrder: string[] = afterData.order || [];
@@ -723,6 +863,7 @@ const jumpToPost = async (post: Post) => {
     const windowPosts = [...deduped.values()].sort((a, b) => a.create_at - b.create_at);
 
     state.posts = windowPosts;
+    fetchMissingRootPosts(windowPosts);
     state.oldestPostId = windowPosts[0]?.id ?? null;
     state.newestPostId = windowPosts[windowPosts.length - 1]?.id ?? null;
     state.hasMoreOlderPosts = beforeOrder.length > 0;
@@ -765,6 +906,7 @@ const loadNewerMessages = async () => {
 
     const order: string[] = data.order || [];
     const postsObj: Record<string, Post> = data.posts || {};
+    cachePosts(postsObj, data.referenced_posts);
 
     state.isLoadingNewer = false;
     messageListHandle?.setLoadingNewer(false);
@@ -785,6 +927,7 @@ const loadNewerMessages = async () => {
       state.posts.push(...newerPosts);
       state.newestPostId = state.posts[state.posts.length - 1]?.id ?? state.newestPostId;
       patchExtractButton();
+      fetchMissingRootPosts(newerPosts);
       messageListHandle?.appendPosts(newerPosts);
     }
 
@@ -839,6 +982,7 @@ const loadOlderMessages = async () => {
 
     const order: string[] = data.order || [];
     const postsObj: Record<string, Post> = data.posts || {};
+    cachePosts(postsObj, data.referenced_posts);
 
     state.isLoadingOlder = false;
 
@@ -857,6 +1001,7 @@ const loadOlderMessages = async () => {
 
     state.posts.unshift(...olderPosts);
     patchExtractButton();
+    fetchMissingRootPosts(olderPosts);
 
     if (messageListHandle) {
       messageListHandle.setLoadingOlder(false);
@@ -909,12 +1054,24 @@ const sendMessage = async (
   const filesToSend = options?.files || [];
   if ((!text && filesToSend.length === 0) || !state.activeChannelId) return;
 
+  const retryPost = options?.retryPost;
+  const replyTarget = retryPost ? null : state.replyingToPost;
+  const rootId = retryPost
+    ? retryPost.root_id || ''
+    : replyTarget
+      ? replyTarget.root_id || replyTarget.id
+      : '';
+
+  if (replyTarget) {
+    postsMap.set(replyTarget.id, replyTarget);
+    setReplyingToPost(null);
+  }
+
   if (state.hasMoreNewerPosts) {
     await jumpToLatest();
   }
 
   const channelId = state.activeChannelId;
-  const retryPost = options?.retryPost;
   const tempId =
     retryPost?.tempId ||
     retryPost?.id ||
@@ -945,6 +1102,7 @@ const sendMessage = async (
       channel_id: channelId,
       message: text,
       create_at: Date.now(),
+      ...(rootId ? { root_id: rootId } : {}),
       status: 'sending',
       metadata: optimisticFiles.length > 0 ? { files: optimisticFiles } : undefined,
     };
@@ -971,6 +1129,7 @@ const sendMessage = async (
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message: text,
+        root_id: rootId,
         file_ids: uploadedFileIds,
       }),
     });
@@ -981,6 +1140,7 @@ const sendMessage = async (
 
     const serverPost: Post = await res.json();
     serverPost.status = 'sent';
+    postsMap.set(serverPost.id, serverPost);
 
     const idx = state.posts.findIndex((p) => p.id === tempId || p.tempId === tempId);
     if (idx !== -1) {
@@ -1079,12 +1239,20 @@ const connectWebSocket = () => {
           typeof document !== 'undefined' && (document.hidden || !document.hasFocus());
 
         if (isCurrentChannel) {
+          postsMap.set(post.id, post);
+          if (post.root_id && !postsMap.has(post.root_id)) {
+            fetchReferencedPost(post.root_id);
+          }
+
           if (state.hasMoreNewerPosts) {
             messageListHandle?.setHasMoreNewer(true, 'New messages available');
           } else {
             if (isFromMe) {
               const pendingIdx = state.posts.findIndex(
-                (p) => (p.status === 'sending' || p.tempId) && p.message === post.message
+                (p) =>
+                  (p.status === 'sending' || p.tempId) &&
+                  p.message === post.message &&
+                  (p.root_id || '') === (post.root_id || '')
               );
               if (pendingIdx !== -1) {
                 const tempId = state.posts[pendingIdx].tempId || state.posts[pendingIdx].id;
@@ -1156,11 +1324,21 @@ const connectWebSocket = () => {
           typeof data.data?.post === 'string' ? JSON.parse(data.data.post) : data.data?.post;
 
         if (post && post.channel_id === state.activeChannelId) {
+          postsMap.set(post.id, post);
+          if (state.replyingToPost?.id === post.id) {
+            setReplyingToPost(post);
+          }
+
           const idx = state.posts.findIndex((p) => p.id === post.id);
           if (idx !== -1) {
             state.posts[idx] = { ...state.posts[idx], ...post };
             if (messageListHandle) {
               messageListHandle.updatePost(state.posts[idx]);
+              for (const p of state.posts) {
+                if (p.root_id === post.id) {
+                  messageListHandle.updatePost(p);
+                }
+              }
             } else {
               render();
             }
@@ -1260,12 +1438,17 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape') {
     if (document.querySelector('#delete-message-modal')) return;
     const searchInput = document.querySelector('#sidebar-search-input') as HTMLInputElement;
+    const messageInput = document.querySelector('#chat-message-input') as HTMLTextAreaElement;
     if (document.activeElement === searchInput) {
       searchInput.value = '';
       patchSidebarSearch('');
       searchInput.blur();
+    } else if (document.activeElement === messageInput && state.replyingToPost) {
+      setReplyingToPost(null);
     } else if (state.isSearchOpen) {
       closeSearchPanel();
+    } else if (state.replyingToPost) {
+      setReplyingToPost(null);
     }
   }
 });

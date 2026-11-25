@@ -27,6 +27,7 @@ export interface MessageListHandle {
 
 interface MessageListProps {
   posts: Post[];
+  postsMap?: Map<string, Post>;
   usersMap: Map<string, User>;
   currentUserId: string | undefined;
   isLoadingOlder: boolean;
@@ -39,6 +40,8 @@ interface MessageListProps {
   handleRef?: (handle: MessageListHandle | null) => void;
   onRetry?: (post: Post) => void;
   onDelete?: (post: Post) => void;
+  onReply?: (post: Post) => void;
+  onJumpToRoot?: (rootId: string) => void;
 }
 
 export const DateDivider = ({ timestamp }: { timestamp: number }) => {
@@ -61,6 +64,7 @@ export const DateDivider = ({ timestamp }: { timestamp: number }) => {
 
 export const MessageList = ({
   posts: initialPosts,
+  postsMap,
   usersMap,
   currentUserId,
   isLoadingOlder,
@@ -73,6 +77,8 @@ export const MessageList = ({
   handleRef,
   onRetry,
   onDelete,
+  onReply,
+  onJumpToRoot,
 }: MessageListProps) => {
   if (initialPosts.length === 0) {
     scrollRef?.(null);
@@ -106,8 +112,12 @@ export const MessageList = ({
       author={usersMap.get(post.user_id)}
       isMe={post.user_id === currentUserId}
       isGrouped={isGrouped}
+      postsMap={postsMap}
+      usersMap={usersMap}
       onRetry={onRetry}
       onDelete={onDelete}
+      onReply={onReply}
+      onJumpToRoot={onJumpToRoot}
     />
   );
 

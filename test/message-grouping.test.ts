@@ -159,6 +159,56 @@ describe('Message Grouping & Date Divider Logic', () => {
     expect(shouldGroupPosts(post1, post2)).toBe(false);
   });
 
+  test('does NOT group across reply boundaries or different threads, but groups consecutive replies to same thread', () => {
+    const normalPost: Post = {
+      id: 'p-normal',
+      user_id: userA.id,
+      channel_id: 'ch1',
+      message: 'Top-level message',
+      create_at: baseTime,
+    };
+
+    const replyToThread1A: Post = {
+      id: 'p-reply-1a',
+      user_id: userA.id,
+      channel_id: 'ch1',
+      message: 'First reply to thread 1',
+      root_id: 'thread-1',
+      create_at: baseTime + 20 * 1000,
+    };
+
+    const replyToThread1B: Post = {
+      id: 'p-reply-1b',
+      user_id: userA.id,
+      channel_id: 'ch1',
+      message: 'Second reply to thread 1',
+      root_id: 'thread-1',
+      create_at: baseTime + 40 * 1000,
+    };
+
+    const replyToThread2: Post = {
+      id: 'p-reply-2',
+      user_id: userA.id,
+      channel_id: 'ch1',
+      message: 'Reply to thread 2',
+      root_id: 'thread-2',
+      create_at: baseTime + 60 * 1000,
+    };
+
+    const normalAfterReply: Post = {
+      id: 'p-normal-2',
+      user_id: userA.id,
+      channel_id: 'ch1',
+      message: 'Back to channel',
+      create_at: baseTime + 80 * 1000,
+    };
+
+    expect(shouldGroupPosts(normalPost, replyToThread1A)).toBe(false);
+    expect(shouldGroupPosts(replyToThread1A, replyToThread1B)).toBe(true);
+    expect(shouldGroupPosts(replyToThread1B, replyToThread2)).toBe(false);
+    expect(shouldGroupPosts(replyToThread2, normalAfterReply)).toBe(false);
+  });
+
   test('formatDateDivider returns Today and Yesterday relative to reference date', () => {
     const ref = new Date('2026-11-05T14:00:00');
     const todayTs = new Date('2026-11-05T09:00:00').getTime();

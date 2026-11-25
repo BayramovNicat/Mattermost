@@ -45,6 +45,8 @@ export interface Post {
   channel_id: string;
   message: string;
   create_at: number;
+  root_id?: string;
+  parent_id?: string;
   metadata?: {
     files?: FileAttachment[];
   };
@@ -106,4 +108,5 @@ export interface AppState {
   notificationsEnabled: boolean;
   isSidebarOpen: boolean;
   isSearchOpen: boolean;
+  replyingToPost: Post | null;
 }

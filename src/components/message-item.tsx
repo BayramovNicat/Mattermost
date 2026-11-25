@@ -1,14 +1,18 @@
 import type { FileAttachment, Post, User } from '../types';
 import { UserAvatar } from './avatar';
-import { AlertCircleIcon, ClockIcon, PaperclipIcon, TrashIcon } from './icons';
+import { AlertCircleIcon, ClockIcon, PaperclipIcon, ReplyIcon, TrashIcon } from './icons';
 
 interface MessageItemProps {
   post: Post;
   author: User | undefined;
   isMe: boolean;
   isGrouped?: boolean;
+  postsMap?: Map<string, Post>;
+  usersMap?: Map<string, User>;
   onRetry?: (post: Post) => void;
   onDelete?: (post: Post) => void;
+  onReply?: (post: Post) => void;
+  onJumpToRoot?: (rootId: string) => void;
 }
 
 const timeFormatter = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
@@ -141,22 +145,99 @@ const renderAttachments = (files: FileAttachment[]) => {
   );
 };
 
-const renderActionToolbar = (post: Post, onDelete?: (post: Post) => void) => {
-  if (!onDelete) return null;
+const getReplyPreviewText = (post: Post): string => {
+  const text = extractMessageText(post).trim().replace(/\s+/g, ' ');
+  if (text) return text;
+  const fileCount = post.metadata?.files?.length || post.file_ids?.length || 0;
+  if (fileCount > 0) {
+    return `${fileCount} ${fileCount === 1 ? 'attachment' : 'attachments'}`;
+  }
+  return '(empty message)';
+};
+
+const renderReplyReference = (
+  rootId: string,
+  postsMap?: Map<string, Post>,
+  usersMap?: Map<string, User>,
+  onJumpToRoot?: (rootId: string) => void
+) => {
+  const parentPost = postsMap?.get(rootId);
+  const parentAuthor = parentPost ? usersMap?.get(parentPost.user_id) : undefined;
+  const parentAuthorName = parentPost
+    ? parentPost.props?.override_username ||
+      parentAuthor?.display_name ||
+      parentAuthor?.username ||
+      'user'
+    : null;
+  const snippet = parentPost ? getReplyPreviewText(parentPost) : 'Original message unavailable';
+
+  return (
+    <button
+      type="button"
+      data-reply-quote={rootId}
+      onClick={(e) => {
+        e.stopPropagation();
+        onJumpToRoot?.(rootId);
+      }}
+      class="max-w-full flex items-center gap-1.5 text-left px-2.5 py-1 mb-1.5 rounded-r-lg border-l-2 border-indigo-500/70 bg-zinc-900/80 hover:bg-zinc-800/70 transition-colors text-[11px] min-w-0 cursor-pointer"
+      title={parentAuthorName ? `Jump to ${parentAuthorName}'s message` : 'Jump to original message'}
+    >
+      <ReplyIcon class="size-3 text-indigo-400 shrink-0" />
+      {parentAuthorName && (
+        <span class="font-semibold text-indigo-300 shrink-0">{parentAuthorName}</span>
+      )}
+      <span class="text-zinc-400 truncate min-w-0">{snippet}</span>
+    </button>
+  );
+};
+
+const renderActionToolbar = ({
+  post,
+  canReply,
+  canDelete,
+  onReply,
+  onDelete,
+}: {
+  post: Post;
+  canReply: boolean;
+  canDelete: boolean;
+  onReply?: (post: Post) => void;
+  onDelete?: (post: Post) => void;
+}) => {
+  const showReply = canReply && Boolean(onReply);
+  const showDelete = canDelete && Boolean(onDelete);
+  if (!showReply && !showDelete) return null;
+
   return (
     <div class="absolute right-2 -top-2.5 z-10 flex items-center gap-0.5 rounded-lg border border-zinc-800 bg-zinc-900/95 p-0.5 shadow-sm opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto transition-opacity">
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete(post);
-        }}
-        class="size-6 rounded-md flex items-center justify-center text-zinc-400 hover:text-rose-400 hover:bg-rose-500/15 transition-colors cursor-pointer"
-        title="Delete message"
-        aria-label="Delete message"
-      >
-        <TrashIcon class="size-3.5" />
-      </button>
+      {showReply && onReply && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onReply(post);
+          }}
+          class="size-6 rounded-md flex items-center justify-center text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/15 transition-colors cursor-pointer"
+          title="Reply to message"
+          aria-label="Reply to message"
+        >
+          <ReplyIcon class="size-3.5" />
+        </button>
+      )}
+      {showDelete && onDelete && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(post);
+          }}
+          class="size-6 rounded-md flex items-center justify-center text-zinc-400 hover:text-rose-400 hover:bg-rose-500/15 transition-colors cursor-pointer"
+          title="Delete message"
+          aria-label="Delete message"
+        >
+          <TrashIcon class="size-3.5" />
+        </button>
+      )}
     </div>
   );
 };
@@ -166,8 +247,12 @@ export const MessageItem = ({
   author,
   isMe,
   isGrouped = false,
+  postsMap,
+  usersMap,
   onRetry,
   onDelete,
+  onReply,
+  onJumpToRoot,
 }: MessageItemProps) => {
   const authorName =
     post.props?.override_username ||
@@ -189,8 +274,12 @@ export const MessageItem = ({
         }));
   const isSending = post.status === 'sending';
   const isFailed = post.status === 'failed';
-  const canDelete = (isMe || isFailed) && !isSending && !post.type?.startsWith('system_');
+  const isSystem = Boolean(post.type?.startsWith('system_'));
+  const canReply = !isSending && !isFailed && !post.id.startsWith('temp_') && !isSystem;
+  const canDelete = (isMe || isFailed) && !isSending && !isSystem;
   const messageText = extractMessageText(post);
+  const replyRootId = post.root_id && post.root_id !== post.id ? post.root_id : '';
+  const toolbar = renderActionToolbar({ post, canReply, canDelete, onReply, onDelete });
 
   if (isGrouped) {
     const containerClasses = [
@@ -203,7 +292,7 @@ export const MessageItem = ({
 
     return (
       <article data-post-id={post.id} class={containerClasses}>
-        {canDelete && renderActionToolbar(post, onDelete)}
+        {toolbar}
         <div class="w-9 shrink-0 flex items-center justify-end pr-1 select-none pt-0.5 min-h-4">
           {isSending ? (
             <ClockIcon class="size-3.5 animate-pulse text-indigo-400" />
@@ -261,7 +350,7 @@ export const MessageItem = ({
 
   return (
     <article data-post-id={post.id} class={containerClasses}>
-      {canDelete && renderActionToolbar(post, onDelete)}
+      {toolbar}
       <UserAvatar
         userId={post.user_id}
         name={authorName}
@@ -299,6 +388,8 @@ export const MessageItem = ({
             <time class="text-[10px] text-zinc-500 font-mono">{dateStr}</time>
           )}
         </header>
+
+        {replyRootId && renderReplyReference(replyRootId, postsMap, usersMap, onJumpToRoot)}
 
         {messageText && (
           <div class="text-xs text-zinc-200 leading-relaxed wrap-break-word">

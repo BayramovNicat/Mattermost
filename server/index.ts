@@ -390,18 +390,41 @@ export function startServer(port = PORT, options: StartServerOptions = {}): Serv
             const page = url.searchParams.get('page') || '0';
             const perPage = url.searchParams.get('per_page') || '30';
 
-            const postsData = await api.getChannelPosts(channelId, {
+            const postsData = (await api.getChannelPosts(channelId, {
               before,
               after,
               page,
               perPage,
-            });
+            })) as {
+              posts?: Record<string, { id?: string; user_id: string; root_id?: string; [key: string]: unknown }>;
+              order?: string[];
+            };
 
             const userIds = new Set<string>();
+            const missingRootIds = new Set<string>();
             if (postsData.posts) {
               for (const pid of Object.keys(postsData.posts)) {
-                if (postsData.posts[pid].user_id) {
-                  userIds.add(postsData.posts[pid].user_id);
+                const post = postsData.posts[pid];
+                if (post.user_id) {
+                  userIds.add(post.user_id);
+                }
+                if (post.root_id && !postsData.posts[post.root_id]) {
+                  missingRootIds.add(post.root_id);
+                }
+              }
+            }
+
+            const referencedPosts: Record<string, { id: string; user_id: string; channel_id: string; [key: string]: unknown }> = {};
+            if (missingRootIds.size > 0) {
+              const settled = await Promise.allSettled(
+                [...missingRootIds].map((rootId) => api.getPost(rootId))
+              );
+              for (const result of settled) {
+                if (result.status === 'fulfilled' && result.value?.id) {
+                  referencedPosts[result.value.id] = result.value;
+                  if (result.value.user_id) {
+                    userIds.add(result.value.user_id);
+                  }
                 }
               }
             }
@@ -422,7 +445,13 @@ export function startServer(port = PORT, options: StartServerOptions = {}): Serv
               }
             }
 
-            return Response.json({ ...postsData, users });
+            return Response.json({
+              ...postsData,
+              ...(Object.keys(referencedPosts).length > 0
+                ? { referenced_posts: referencedPosts }
+                : {}),
+              users,
+            });
           } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);
             return Response.json({ error: message }, { status: 500 });
@@ -441,6 +470,36 @@ export function startServer(port = PORT, options: StartServerOptions = {}): Serv
       }
 
       const postMatch = url.pathname.match(/^\/api\/posts\/([^/]+)$/);
+      if (postMatch && req.method === 'GET') {
+        try {
+          const postId = decodeURIComponent(postMatch[1]);
+          const post = await api.getPost(postId);
+          if (url.searchParams.get('include_users') === '1') {
+            const users: Record<string, { id: string; username: string; display_name: string }> = {};
+            if (post.user_id) {
+              try {
+                const userList = await api.getUsersByIds([post.user_id]);
+                for (const u of userList) {
+                  users[u.id] = {
+                    id: u.id,
+                    username: u.username,
+                    display_name: `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.username,
+                  };
+                }
+              } catch (e) {
+                console.error('Failed to fetch user for post:', e);
+              }
+            }
+            return Response.json({ post, users });
+          }
+          return Response.json(post);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          const statusMatch = message.match(/Mattermost API Error \((\d+)\)/);
+          const status = statusMatch ? Number.parseInt(statusMatch[1], 10) : 500;
+          return Response.json({ error: message }, { status });
+        }
+      }
       if (postMatch && req.method === 'DELETE') {
         try {
           const postId = decodeURIComponent(postMatch[1]);

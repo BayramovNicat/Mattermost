@@ -73,5 +73,10 @@ export const shouldGroupPosts = (
     return false;
   }
 
+  // Keep replies separate from normal messages and from replies to other threads
+  if ((prevPost.root_id || '') !== (currentPost.root_id || '')) {
+    return false;
+  }
+
   return true;
 };

@@ -149,6 +149,10 @@ export class MattermostAPI {
     });
   }
 
+  async getPost(postId: string): Promise<{ id: string; user_id: string; channel_id: string; [key: string]: unknown }> {
+    return this.request(`/posts/${encodeURIComponent(postId)}`);
+  }
+
   async deletePost(postId: string): Promise<{ status: string }> {
     const res = await this.request<{ status?: string } | Response>(
       `/posts/${encodeURIComponent(postId)}`,
